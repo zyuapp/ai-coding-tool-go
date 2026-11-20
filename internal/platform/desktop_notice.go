@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -52,11 +53,7 @@ func Notify(title, body string, onClick func()) {
 }
 
 // ThreadNotice is a thread's notice, as the runtime raises it.
-type ThreadNotice struct {
-	TaskID   string `json:"taskId"`
-	Title    string `json:"title"`
-	Headline string `json:"headline"`
-}
+type ThreadNotice = contracts.ThreadNotice
 
 // NoticeHost is what a notice needs from the window it belongs to.
 type NoticeHost interface {

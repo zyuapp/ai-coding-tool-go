@@ -362,6 +362,16 @@ if (!navigator.clipboard) {
   });
 }
 
+/** Main sends a frame's bytes as base64, which JSON can carry; the view decodes them as they arrived in Electron. */
+type SimulatorFramePushed = Record<string, unknown> & { data: string };
+
+function base64Bytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
 const desktop: WindowDesktopAPI = {
   platform,
   windowMaterial,
@@ -385,7 +395,7 @@ const desktop: WindowDesktopAPI = {
   watchSimulator: relay("watchSimulator"),
   unwatchSimulator: relay("unwatchSimulator"),
   onTerminalData: pushed("terminal:data"),
-  onSimulatorFrame: pushed("simulator:frame"),
+  onSimulatorFrame: (listener) => pushed<SimulatorFramePushed>("simulator:frame")((frame) => listener({ ...frame, data: base64Bytes(frame.data) } as Parameters<typeof listener>[0])),
   onWindowScreenshot: pushed("window:screenshot"),
   onDesktopShortcutRefused: pushed("window:shortcut-refused"),
   onShortcut: pushed("window:shortcut"),

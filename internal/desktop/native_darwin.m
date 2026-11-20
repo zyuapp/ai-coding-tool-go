@@ -11,6 +11,7 @@ extern void actWindowCloseRequested(void);
 extern void actReopen(void);
 extern void actDockMarkAllRead(void);
 extern void actTransparencyChanged(int reduced);
+extern void actDidWake(void);
 
 static BOOL dockHasUnread = NO;
 static void placeTrafficLights(NSWindow *window);
@@ -186,6 +187,14 @@ void actZoomPage(int step) {
     if (!webView) return;
     zoomLevel = step == 0 ? 0 : fmax(-8, fmin(9, zoomLevel + step * 0.5));
     if (@available(macOS 11.0, *)) [webView setPageZoom:pow(1.2, zoomLevel)];
+  });
+}
+
+void actFocusPage(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSWindow *window = mainWindow();
+    WKWebView *webView = findWebView([window contentView]);
+    if (webView) [window makeFirstResponder:webView];
   });
 }
 
@@ -389,5 +398,8 @@ int actReducedTransparency(void) {
 void actWatchTransparency(void) {
   [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
     actTransparencyChanged(actReducedTransparency());
+  }];
+  [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+    actDidWake();
   }];
 }

@@ -97,7 +97,8 @@ func ReduceBrowser(state *WorkspaceState, input WorkspaceInput) SliceTransition 
 		return SliceTransition{Effects: []WorkspaceEffect{WorkspaceEffectBrowserAct{TabID: target.ID, Action: input.Action, TaskID: input.TaskID}}}
 
 	case contracts.BrowserCommandBrowserClearData:
-		return SliceTransition{Patch: func(next *WorkspaceState) { next.BrowserOrigins = []string{} }, Effects: []WorkspaceEffect{WorkspaceEffectBrowserClearData{}}, Persists: true}
+		// Capacity 1: empty slices of capacity 0 share one address, so jsonx.Same would see no change.
+		return SliceTransition{Patch: func(next *WorkspaceState) { next.BrowserOrigins = make([]string, 0, 1) }, Effects: []WorkspaceEffect{WorkspaceEffectBrowserClearData{}}, Persists: true}
 
 	case BrowserEvent:
 		page := input.Page

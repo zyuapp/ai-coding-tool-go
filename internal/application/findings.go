@@ -119,5 +119,5 @@ func DeclinedTick(state *WorkspaceState, fire contracts.AutomationFire, thread *
 
 // localeDateTime is new Date(ms).toLocaleString() in an en-US runtime, in local time.
 func localeDateTime(ms float64) string {
-	return time.UnixMilli(int64(ms)).Format("1/2/2006, 3:04:05\u202fPM")
+	return time.UnixMilli(int64(ms)).Format("1/2/2006, 3:04:05 PM")
 }

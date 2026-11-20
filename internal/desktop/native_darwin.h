@@ -16,6 +16,7 @@ void actHideApp(void);
 void actSetBackground(int r, int g, int b, int a);
 void actSetAppearance(int mode);
 void actZoomPage(int step);
+void actFocusPage(void);
 void actToggleInspector(void);
 void actSetDockUnread(int unread);
 void actInstallWindowHooks(int material);

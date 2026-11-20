@@ -2,6 +2,8 @@ package platform
 
 import (
 	"errors"
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
+	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +12,7 @@ import (
 )
 
 // ExternalApp is an application a checkout can be handed to, as the domain catalog lists it.
-type ExternalApp struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-	Kind  string `json:"kind"`
-}
+type ExternalApp = domain.ExternalApp
 
 // AppCandidate is one place an application might be and the command that opens a folder there. One
 // with a Probe exists only if that path does; one without is looked up on the search path.
@@ -28,12 +26,7 @@ type AppCandidate struct {
 }
 
 // InstalledApp is an application on this machine, with its icon as a data URL or null.
-type InstalledApp struct {
-	ID    string  `json:"id"`
-	Label string  `json:"label"`
-	Kind  string  `json:"kind"`
-	Icon  *string `json:"icon"`
-}
+type InstalledApp = contracts.InstalledApp
 
 // AppCatalog is the domain's catalog of applications for this platform.
 type AppCatalog struct {
@@ -90,7 +83,7 @@ func (o *AppOpener) installed(entry ExternalApp) *InstalledApp {
 		if !candidateExists(candidate) {
 			continue
 		}
-		app := &InstalledApp{ID: entry.ID, Label: entry.Label, Kind: entry.Kind}
+		app := &InstalledApp{ExternalApp: entry}
 		if candidate.Icon != nil {
 			app.Icon = BundleIcon(*candidate.Icon)
 		}

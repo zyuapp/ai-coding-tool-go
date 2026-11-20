@@ -3,81 +3,31 @@ package terminal
 import (
 	"math"
 	"unicode/utf8"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
+	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
 )
 
-// Local mirrors of src/contracts/terminal.ts and src/domain/terminal.ts, to be replaced by the
-// generated contracts and domain types.
-
-// Status is TerminalSession["status"].
-type Status string
+// The contracts and domain shapes the host reports in.
+type (
+	Status         = domain.TerminalUpdateStatus
+	Update         = domain.TerminalUpdate
+	StartOptions   = contracts.TerminalStartOptions
+	ReadOptions    = contracts.TerminalReadOptions
+	Text           = contracts.TerminalText
+	Size           = contracts.TerminalDataEventSize
+	DataEvent      = contracts.TerminalDataEvent
+	ScreenSnapshot = contracts.TerminalScreenSnapshot
+	ReadKind       = contracts.TerminalOutputReadKind
+	OutputRead     = contracts.TerminalOutputRead
+)
 
 const (
-	StatusRunning Status = "running"
-	StatusExited  Status = "exited"
+	StatusRunning = domain.TerminalUpdateStatusRunning
+	StatusExited  = domain.TerminalUpdateStatusExited
+	ReadSnapshot  = contracts.TerminalOutputReadKindSnapshot
+	ReadOutput    = contracts.TerminalOutputReadKindOutput
 )
-
-// Update is TerminalUpdate: what the host reports about a session.
-type Update struct {
-	TerminalID string   `json:"terminalId"`
-	Title      *string  `json:"title,omitzero"`
-	Status     *Status  `json:"status,omitzero"`
-	ExitCode   *float64 `json:"exitCode,omitzero"`
-	Error      *string  `json:"error,omitzero"`
-}
-
-// StartOptions is TerminalStartOptions.
-type StartOptions struct {
-	Cwd string `json:"cwd"`
-}
-
-// ReadOptions is TerminalReadOptions.
-type ReadOptions struct {
-	Lines float64 `json:"lines"`
-	Match *string `json:"match,omitzero"`
-}
-
-// Text is TerminalText: a terminal's lines with no escape sequences left.
-type Text struct {
-	Lines   []string `json:"lines"`
-	Omitted float64  `json:"omitted"`
-	Matched *float64 `json:"matched,omitzero"`
-}
-
-// Size is TerminalDataEvent["size"].
-type Size struct {
-	Cols float64 `json:"cols"`
-	Rows float64 `json:"rows"`
-}
-
-// DataEvent is TerminalDataEvent, the payload of the window's terminal:data event.
-type DataEvent struct {
-	TerminalID string  `json:"terminalId"`
-	Data       string  `json:"data"`
-	Sequence   float64 `json:"sequence"`
-	Size       *Size   `json:"size,omitzero"`
-}
-
-// ScreenSnapshot is TerminalScreenSnapshot.
-type ScreenSnapshot struct {
-	Data     string  `json:"data"`
-	Cols     float64 `json:"cols"`
-	Rows     float64 `json:"rows"`
-	Sequence float64 `json:"sequence"`
-}
-
-// ReadKind is TerminalOutputRead["kind"].
-type ReadKind string
-
-const (
-	ReadSnapshot ReadKind = "snapshot"
-	ReadOutput   ReadKind = "output"
-)
-
-// OutputRead is TerminalOutputRead.
-type OutputRead struct {
-	ScreenSnapshot `json:",inline"`
-	Kind           ReadKind `json:"kind"`
-}
 
 const (
 	// MaxInput is MAX_TERMINAL_INPUT, in UTF-16 code units.

@@ -84,9 +84,9 @@ func (d desktopUpdates) InstallUpdate(unattended *bool) {
 // ServeUpdater is a headless server's own updater (serve-updates).
 type ServeUpdater interface {
 	State() domain.AppUpdate
-	Check(ctx context.Context)
-	Download(ctx context.Context)
-	Install(ctx context.Context)
+	Check()
+	Download()
+	Install()
 }
 
 // HeadlessHost is what the update port is served from on a server with no screen.
@@ -110,7 +110,7 @@ func NewHeadless(host HeadlessHost) contracts.UpdatePortRuntime {
 
 func (h headlessUpdates) CheckForUpdates(*bool) {
 	if h.host.Updates != nil {
-		go h.host.Updates.Check(context.Background())
+		go h.host.Updates.Check()
 	}
 }
 
@@ -133,12 +133,12 @@ func (h headlessUpdates) OnAppUpdate(listener func(update domain.AppUpdate)) fun
 
 func (h headlessUpdates) DownloadUpdate(*bool) {
 	if h.host.Updates != nil {
-		go h.host.Updates.Download(context.Background())
+		go h.host.Updates.Download()
 	}
 }
 
 func (h headlessUpdates) InstallUpdate(*bool) {
 	if h.host.Updates != nil {
-		go h.host.Updates.Install(context.Background())
+		go h.host.Updates.Install()
 	}
 }

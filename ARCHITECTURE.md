@@ -26,9 +26,10 @@ Go + Wails v2 rewrite of [AI Coding Tool](https://github.com/zyuapp/ai-coding-to
 | `internal/mobile` | `src/main/mobile` | the phone bridge, pairing, Tailscale |
 | `internal/automation` | `src/main/automation` | scheduled automations |
 | `internal/updates` | `updates.ts`, `update-*`, `appimage-update`, `cli-install` | app updates and the `aicodingtool` command |
+| `internal/services` | `main.ts` startup, `service-desktop.ts`, `desktop-events.ts`, `serve.ts` | opens every service on a profile for the window and for `serve`, with the adapters from the service packages' own records to the generated types |
 | `internal/desktop` | `window-desktop`, `runtime-desktop`, `service-desktop`, `workspace-runtime-host`, `keyboard-host`, menus, protocols | the Wails glue: implements the ports, serves the window's calls, pushes events |
 
-Packages mirror the TypeScript layers, so imports point the same way: `domain` ← `contracts` ← `application` ← `host` ← everything under `internal/` that implements a port ← `desktop` ← `main`. `domain`, `contracts`, `application` and `host` import no OS, Wails or cgo code. Only `engines` reaches into an engine's package; tool definitions import nothing else from the services.
+Packages mirror the TypeScript layers, so imports point the same way: `domain` ← `contracts` ← `application` ← `host` ← everything under `internal/` that implements a port ← `services` ← `desktop` ← `main`. `domain`, `contracts`, `application` and `host` import no OS, Wails or cgo code. Only `engines` reaches into an engine's package; tool definitions import nothing else from the services.
 
 Each TypeScript file `src/<layer>/<dir>/<name>.ts` maps to `internal/<layer>/<dir_><name>.go` (directories flattened into a file prefix, kebab-case to snake_case), so the port of any file is found by name. Types generated from TypeScript live in `*_types.go` (see below) beside the hand-ported logic.
 

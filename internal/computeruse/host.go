@@ -66,6 +66,9 @@ func NewHost(binary string) *Host {
 	return &Host{binary: binary, env: os.Getenv, accepting: true}
 }
 
+// Binary is the bundled driver this host starts.
+func (h *Host) Binary() string { return h.binary }
+
 func (h *Host) binaryExists() bool {
 	info, err := os.Stat(h.binary)
 	return err == nil && !info.IsDir()

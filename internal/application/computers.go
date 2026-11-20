@@ -328,8 +328,7 @@ func asHolderTakes(holder *PairedComputer, input contracts.AppCommand) []Workspa
 	return []WorkspaceInput{input}
 }
 
-// A string field of a command by its Go name: present when the command declares it and it is set.
-// An empty id names nothing, as validation never lets one through.
+// A string field of a command by its Go name: present when the command declares it and, if optional, sets it.
 func computersCommandField(input contracts.AppCommand, name string) (string, bool) {
 	value := reflect.ValueOf(input)
 	for value.Kind() == reflect.Pointer {
@@ -346,12 +345,12 @@ func computersCommandField(input contracts.AppCommand, name string) (string, boo
 	case !field.IsValid():
 		return "", false
 	case field.Kind() == reflect.String:
-		return field.String(), field.String() != ""
+		return field.String(), true
 	case field.Kind() == reflect.Pointer && field.Type().Elem().Kind() == reflect.String:
 		if field.IsNil() {
 			return "", false
 		}
-		return field.Elem().String(), field.Elem().String() != ""
+		return field.Elem().String(), true
 	}
 	return "", false
 }

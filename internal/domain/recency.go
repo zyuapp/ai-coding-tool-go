@@ -10,7 +10,7 @@ const dayMs = 86_400_000
 // The formats stand for Intl.DateTimeFormat in an en-US locale. TS names the first TIME; it is
 // recencyTime here because a package-level `time` would collide with the time package.
 const (
-	recencyTime = "3:04 PM"
+	recencyTime = "3:04 PM"
 	weekday     = "Mon"
 	date        = "Jan 2"
 	dateYear    = "Jan 2, 2006"

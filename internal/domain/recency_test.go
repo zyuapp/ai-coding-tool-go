@@ -25,7 +25,7 @@ func TestRecencyLabelCountsCalendarDays(t *testing.T) {
 	if label := RecencyLabel(float64(time.Date(2025, 3, 4, 12, 0, 0, 0, time.Local).UnixMilli()), at(9, 12, 0)); label != "Mar 4, 2025" {
 		t.Fatal(label)
 	}
-	if label := RecencyLabel(at(9, 15, 4), at(9, 16, 0)); label != "3:04\u202fPM" {
+	if label := RecencyLabel(at(9, 15, 4), at(9, 16, 0)); label != "3:04 PM" {
 		t.Fatal(label)
 	}
 }

@@ -73,6 +73,7 @@ func (app *App) nativeHideOthers()               {}
 func (app *App) nativeShowAll()                  {}
 func (app *App) nativeHideApp()                  { runtime.WindowHide(app.ctx) }
 func (app *App) nativeZoomPage(step int)         {}
+func (app *App) nativeFocusPage()                {}
 func (app *App) nativeToggleInspector()          {}
 func (app *App) nativeSetDockUnread(unread bool) {}
 func (app *App) nativeSetAppearance(mode int)    {}

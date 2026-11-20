@@ -2,8 +2,6 @@ package desktop
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"io/fs"
@@ -23,6 +21,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/zyuapp/ai-coding-tool-go/internal/updates"
 )
 
 // WindowMaterial mirrors contracts/ipc.ts: what the platform draws under the page.
@@ -52,8 +51,13 @@ type Options struct {
 	Ready <-chan struct{}
 	// OpenProject registers a folder the `aic` command named and shows it in the window.
 	OpenProject func(root string) error
-	// BeforeQuit drains what must be saved before the process leaves; an error keeps the app open.
-	BeforeQuit func() error
+	// BeforeQuit answers whether to hold the quit: it starts saving what must be saved, and quits
+	// again once that is done.
+	BeforeQuit func() (prevent bool)
+	// WindowReady runs once the native window exists.
+	WindowReady func()
+	// OnWake runs when the machine wakes from sleep.
+	OnWake func()
 }
 
 // App is the window and everything the desktop does for it.
@@ -78,6 +82,10 @@ type App struct {
 	themes     themeWriter
 	placements placementWriter
 	stopView   func()
+
+	// started closes once the window exists; done once the app has quit.
+	started chan struct{}
+	done    chan struct{}
 }
 
 type keyboardState struct {
@@ -90,7 +98,7 @@ func New(options Options) *App {
 	if options.AppName == "" {
 		options.AppName = "AI Coding Tool"
 	}
-	app := &App{options: options, material: windowMaterial()}
+	app := &App{options: options, material: windowMaterial(), started: make(chan struct{}), done: make(chan struct{})}
 	app.bridge = newBridge(app)
 	app.theme = LoadWindowTheme(filepath.Join(options.ProfileDir, ThemeFile))
 	app.keyboard = keyboardState{Overrides: jsontext.Value("{}")}
@@ -159,11 +167,7 @@ func (app *App) Run() error {
 		OnBeforeClose:      func(ctx context.Context) bool { return app.beforeQuit() },
 		OnShutdown:         func(ctx context.Context) { app.shutdown() },
 		Bind:               []any{app.bridge},
-		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId:               instanceID(app.options.ProfileDir),
-			OnSecondInstanceLaunch: func(data options.SecondInstanceData) { app.secondInstance(data.Args) },
-		},
-		DragAndDrop: &options.DragAndDrop{EnableFileDrop: true},
+		DragAndDrop:        &options.DragAndDrop{EnableFileDrop: true},
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: translucent,
@@ -176,12 +180,6 @@ func (app *App) Run() error {
 		},
 		Linux: &linux.Options{ProgramName: app.options.AppName, WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand},
 	})
-}
-
-// instanceID keeps one window per profile, as the profile's lock does.
-func instanceID(profile string) string {
-	sum := sha256.Sum256([]byte(profile))
-	return "com.zyuapp.aicodingtool." + hex.EncodeToString(sum[:8])
 }
 
 // quitsWithLastWindow: macOS keeps the app running with no window.
@@ -230,6 +228,10 @@ func (app *App) startup(ctx context.Context, placement WindowPlacement) {
 	runtime.OnFileDrop(ctx, func(x, y int, paths []string) {
 		app.SendValue(ChannelFileDrop, map[string]any{"x": x, "y": y, "paths": paths})
 	})
+	close(app.started)
+	if app.options.WindowReady != nil {
+		go app.options.WindowReady()
+	}
 	if root := ProjectPathFromArgv(os.Args[1:]); root != "" {
 		app.openProject(root)
 	}
@@ -424,20 +426,41 @@ func (app *App) beforeQuit() (prevent bool) {
 	if state, ok := app.nativeWindowState(); ok && state.visible {
 		app.recordPlacement(state, true)
 	}
-	if app.options.BeforeQuit != nil {
-		if err := app.options.BeforeQuit(); err != nil {
-			app.mu.Lock()
-			app.quitting = false
-			app.mu.Unlock()
-			app.Reveal()
-			runtime.MessageDialog(app.context(), runtime.MessageDialogOptions{Type: runtime.ErrorDialog, Title: "Could not save the workspace", Message: err.Error()})
-			return true
-		}
+	return app.options.BeforeQuit != nil && app.options.BeforeQuit()
+}
+
+// quitFailed brings the window back to say why the workspace could not be saved.
+func (app *App) quitFailed(err error) {
+	app.mu.Lock()
+	app.quitting = false
+	app.mu.Unlock()
+	app.Reveal()
+	runtime.MessageDialog(app.context(), runtime.MessageDialogOptions{Type: runtime.ErrorDialog, Title: "Could not save the workspace", Message: err.Error()})
+}
+
+// closeWindow closes the window as its close button does.
+func (app *App) closeWindow() {
+	if quitsWithLastWindow() {
+		runtime.Quit(app.context())
+		return
 	}
-	return false
+	runtime.WindowHide(app.context())
+	app.windowClosing()
+}
+
+// focusPage takes the keyboard back from a page in the browser panel. Only a window already in
+// front takes it, since focusing one that is not raises it over whatever the user is in.
+func (app *App) focusPage() {
+	app.mu.Lock()
+	active := app.active != nil && *app.active
+	app.mu.Unlock()
+	if active {
+		app.nativeFocusPage()
+	}
 }
 
 func (app *App) shutdown() {
+	defer close(app.done)
 	if app.stopView != nil {
 		app.stopView()
 	}
@@ -536,4 +559,40 @@ func (app *App) markAllRead() { app.dispatch("task.read-all") }
 func (app *App) menuCommand(command string) {
 	app.Reveal()
 	app.dispatch(command)
+}
+
+// messageBox shows a box over the window and answers the index of the button pressed; false when
+// there is no window to show it on.
+func (app *App) messageBox(box updates.MessageBox) (int, bool) {
+	app.mu.Lock()
+	ctx := app.ctx
+	app.mu.Unlock()
+	if ctx == nil {
+		return 0, false
+	}
+	kind := runtime.InfoDialog
+	if box.Type == "warning" {
+		kind = runtime.WarningDialog
+	}
+	message := box.Message
+	if box.Detail != "" {
+		message += "\n\n" + box.Detail
+	}
+	options := runtime.MessageDialogOptions{Type: kind, Title: box.Title, Message: message, Buttons: box.Buttons}
+	if box.DefaultID >= 0 && box.DefaultID < len(box.Buttons) {
+		options.DefaultButton = box.Buttons[box.DefaultID]
+	}
+	if box.CancelID >= 0 && box.CancelID < len(box.Buttons) {
+		options.CancelButton = box.Buttons[box.CancelID]
+	}
+	pressed, err := runtime.MessageDialog(ctx, options)
+	if err != nil {
+		return box.CancelID, true
+	}
+	for index, label := range box.Buttons {
+		if label == pressed {
+			return index, true
+		}
+	}
+	return box.CancelID, true
 }

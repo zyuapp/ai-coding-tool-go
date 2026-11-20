@@ -342,13 +342,13 @@ func (h *Host) ReadOutput(ctx context.Context, terminalID string, after *float64
 	if after != nil {
 		if data, ok := s.output.read(int64(*after), s.sequence); ok {
 			return &OutputRead{
-				ScreenSnapshot: ScreenSnapshot{Data: data, Sequence: float64(s.sequence), Cols: float64(s.screen.Cols()), Rows: float64(s.screen.Rows())},
-				Kind:           ReadOutput,
+				TerminalScreenSnapshot: ScreenSnapshot{Data: data, Sequence: float64(s.sequence), Cols: float64(s.screen.Cols()), Rows: float64(s.screen.Rows())},
+				Kind:                   ReadOutput,
 			}, nil
 		}
 	}
 	s.flushLocked()
-	return &OutputRead{ScreenSnapshot: *s.snapshotLocked(), Kind: ReadSnapshot}, nil
+	return &OutputRead{TerminalScreenSnapshot: *s.snapshotLocked(), Kind: ReadSnapshot}, nil
 }
 
 // ReadTerminal is the runtime port's read: the line limit is clamped as terminalLineLimit does.

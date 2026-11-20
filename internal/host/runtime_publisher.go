@@ -131,6 +131,15 @@ func (p *Publisher) Request(ctx context.Context, input application.WorkspaceInpu
 	return p.answer(p.runtime.Execute(input).Completed(ctx))
 }
 
+// Begin starts one input now, in the order Begin is called, and returns what Request would answer
+// once its effects have settled.
+func (p *Publisher) Begin(input application.WorkspaceInput) func(ctx context.Context) application.WorkspaceResponseResult {
+	execution := p.runtime.Execute(input)
+	return func(ctx context.Context) application.WorkspaceResponseResult {
+		return p.answer(execution.Completed(ctx))
+	}
+}
+
 // Flush waits for every effect in flight and every write behind it, then publishes what they left.
 func (p *Publisher) Flush(ctx context.Context) application.WorkspaceResponseResult {
 	return p.answer(acceptedResult, p.runtime.Flush(ctx))

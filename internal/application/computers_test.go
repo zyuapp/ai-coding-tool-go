@@ -2,6 +2,7 @@ package application
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -9,6 +10,12 @@ import (
 	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
 	"github.com/zyuapp/ai-coding-tool-go/internal/jsonx"
 )
+
+// cmpOptionalTaskID says whether a command's taskId may be left out.
+func cmpOptionalTaskID(input contracts.AppCommand) bool {
+	field := reflect.ValueOf(input).FieldByName("TaskID")
+	return field.IsValid() && field.Kind() == reflect.Pointer
+}
 
 // cmpPorted runs `body`, skipping the test while it reaches a function another group has yet to port.
 func cmpPorted(t *testing.T, body func()) {
@@ -193,7 +200,12 @@ func TestEachCommandGoesWhereItsPlacementSays(t *testing.T) {
 			case contracts.CommandPlacementLocal:
 				cmpSameJSON(t, RouteInput(state, input), local, definition.Type)
 			case contracts.CommandPlacementThread:
-				cmpSameJSON(t, RouteInput(state, input), InputRouteComputer{Computer: *linux, Inputs: []WorkspaceInput{input}}, definition.Type)
+				// A required taskId decodes as "", which names a thread no computer holds.
+				if _, required := computersCommandField(input, "TaskID"); required && !cmpOptionalTaskID(input) {
+					cmpSameJSON(t, RouteInput(state, input), local, definition.Type)
+				} else {
+					cmpSameJSON(t, RouteInput(state, input), InputRouteComputer{Computer: *linux, Inputs: []WorkspaceInput{input}}, definition.Type)
+				}
 				if definition.Type != "task.clear-archive" && strings.Contains(","+strings.Join(definition.Fields, ",")+",", ",taskId,") {
 					var named contracts.AppCommand
 					if err := jsonx.Unmarshal([]byte(`{"type":"`+definition.Type+`","taskId":"local"}`), &named); err == nil {

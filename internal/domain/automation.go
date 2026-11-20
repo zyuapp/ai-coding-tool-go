@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"math"
 	"regexp"
 	"strconv"
@@ -121,7 +123,11 @@ func IsAutomationDraft(value any) bool {
 }
 
 // IsAutomationPatch checks a JSON-decoded value (map[string]any, float64, …).
+// An array passes as a patch naming no field, as TypeScript reads one.
 func IsAutomationPatch(value any) bool {
+	if _, ok := value.([]any); ok {
+		return true
+	}
 	patch, ok := value.(map[string]any)
 	if !ok {
 		return false
@@ -139,6 +145,16 @@ func IsAutomationPatch(value any) bool {
 		absentOr("surfaceWhen", emptyOr(MaxSurfaceWhen)) &&
 		absentOr("endsWhen", emptyOr(MaxEndsWhen)) &&
 		absentOr("paused", featuresIsBool)
+}
+
+// UnmarshalJSONFrom reads an array, which IsAutomationPatch lets through, as an empty patch.
+func (p *AutomationPatch) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if dec.PeekKind() == '[' {
+		*p = AutomationPatch{}
+		return dec.SkipValue()
+	}
+	type fields AutomationPatch
+	return json.UnmarshalDecode(dec, (*fields)(p))
 }
 
 // AutomationAfterRun returns a new record; a tick that never ran leaves the counters alone.

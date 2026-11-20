@@ -34,7 +34,7 @@ type Options struct {
 
 // Authority is the run's policy ceiling, rechecked inside the mutation queue; only native user
 // writes may omit it. An error refuses the write.
-type Authority func() (domain.ExecutionPolicy, error)
+type Authority = func() (domain.ExecutionPolicy, error)
 
 var policyRank = map[domain.ExecutionPolicy]int{
 	domain.ExecutionPolicyPlan:       0,

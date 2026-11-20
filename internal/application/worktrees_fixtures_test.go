@@ -66,4 +66,3 @@ func awText(text *string) string {
 	}
 	return *text
 }
-

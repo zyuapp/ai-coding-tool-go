@@ -22,7 +22,7 @@ type WorkspaceResolver interface {
 }
 
 // The policy the run asking may grant, or why it may no longer ask.
-type AutomationAuthority func() (domain.ExecutionPolicy, error)
+type AutomationAuthority = func() (domain.ExecutionPolicy, error)
 
 // The automation scheduler as the run host asks it (src/main/automation/automation-scheduler.mts).
 type AutomationScheduler interface {

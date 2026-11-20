@@ -233,6 +233,8 @@ type Runtime struct {
 	desktop RuntimeDesktop
 	state   atomic.Pointer[application.WorkspaceState]
 	jobs    *jobQueue
+	// ordered runs the effects that must reach the desktop in order, one after another.
+	ordered *jobQueue
 	loaded  *latch
 
 	mu               sync.Mutex
@@ -274,6 +276,7 @@ func CreateWorkspaceRuntime(host WorkspaceRuntimeHost) *Runtime {
 		host:                 host,
 		desktop:              host.Desktop,
 		jobs:                 &jobQueue{wake: make(chan struct{}, 1)},
+		ordered:              &jobQueue{wake: make(chan struct{}, 1)},
 		loaded:               deferred(),
 		listeners:            map[int]func(){},
 		badgeCount:           -1,
@@ -312,6 +315,7 @@ func CreateWorkspaceRuntime(host WorkspaceRuntimeHost) *Runtime {
 		},
 	})
 	go r.jobs.run()
+	go r.ordered.run()
 	return r
 }
 
@@ -520,10 +524,25 @@ func followUp(effect application.WorkspaceEffect) bool {
 	return field.IsValid() && !field.IsNil() && field.Elem().Bool()
 }
 
-// performEffect carries out an effect on its own goroutine, answering with what its replies said.
+// inOrder is whether an effect must reach the desktop in the order the reducer made it, as a
+// shell's keystrokes must: TypeScript starts every effect synchronously, so its first call keeps order.
+func inOrder(effect application.WorkspaceEffect) bool {
+	switch effect.(type) {
+	case application.WorkspaceEffectTerminalStart, application.WorkspaceEffectTerminalWrite, application.WorkspaceEffectTerminalResize, application.WorkspaceEffectTerminalClose:
+		return true
+	}
+	return false
+}
+
+// performEffect carries out an effect on its own goroutine, or in the ordered lane, answering with
+// what its replies said.
 func (r *Runtime) performEffect(effect application.WorkspaceEffect, generation int) *commandResult {
 	work := newFuture[contracts.WorkspaceCommandResult]()
-	go func() {
+	start := func(run func()) { go run() }
+	if inOrder(effect) {
+		start = r.ordered.post
+	}
+	start(func() {
 		var (
 			mu      sync.Mutex
 			replies []contracts.WorkspaceCommandResult
@@ -555,7 +574,7 @@ func (r *Runtime) performEffect(effect application.WorkspaceEffect, generation i
 		mu.Lock()
 		defer mu.Unlock()
 		work.settle(combineResults(acceptedResult, replies), nil)
-	}()
+	})
 	return work
 }
 

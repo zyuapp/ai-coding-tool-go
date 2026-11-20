@@ -1,6 +1,17 @@
 package domain
 
+// IsReviewTarget takes a decoded member as well as plain JSON.
 func IsReviewTarget(value any) bool {
+	switch target := value.(type) {
+	case ReviewTargetUncommittedChanges:
+		return true
+	case ReviewTargetBaseBranch:
+		return bounded(target.Branch, 4_096)
+	case ReviewTargetCommit:
+		return bounded(target.Sha, 256) && (target.Title == nil || bounded(*target.Title, 10_000))
+	case ReviewTargetCustom:
+		return bounded(target.Instructions, 1_000_000)
+	}
 	target, ok := record(value)
 	if !ok {
 		return false

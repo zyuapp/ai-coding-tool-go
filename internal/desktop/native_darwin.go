@@ -55,6 +55,13 @@ func actTransparencyChanged(reduced C.int) {
 	}
 }
 
+//export actDidWake
+func actDidWake() {
+	if app := activeApp; app != nil && app.options.OnWake != nil {
+		go app.options.OnWake()
+	}
+}
+
 //export actDockMarkAllRead
 func actDockMarkAllRead() {
 	if app := activeApp; app != nil {
@@ -135,6 +142,7 @@ func (app *App) nativeHideOthers()           { C.actHideOthers() }
 func (app *App) nativeShowAll()              { C.actShowAll() }
 func (app *App) nativeHideApp()              { C.actHideApp() }
 func (app *App) nativeZoomPage(step int)     { C.actZoomPage(C.int(step)) }
+func (app *App) nativeFocusPage()            { C.actFocusPage() }
 func (app *App) nativeToggleInspector()      { C.actToggleInspector() }
 func (app *App) nativeSetDockUnread(on bool) { C.actSetDockUnread(cBool(on)) }
 func (app *App) nativeSetBadge(count int)    { C.actSetBadge(C.int(count)) }
