@@ -14,7 +14,7 @@ Go + Wails v2 rewrite of [AI Coding Tool](https://github.com/zyuapp/ai-coding-to
 | `internal/application` | `src/application` (with `state/` and `workspace-reducer/`) | workspace state, `Reduce`, effects, view projections the host needs |
 | `internal/host` | `src/host` | the runtime: owns state, runs inputs through `Reduce`, performs effects, persists, publishes patches |
 | `internal/platform` | `login-path`, `agent-process`, `instance-lock`, `user-data*`, `system-memory`, `lock-awake`, `open-in-*`, notices, badge, dock | everything that differs between operating systems |
-| `internal/store` | `task-database*`, `json-storage`, `attachment-store`, `message-image-store` | SQLite store, schema-compatible with the Electron app's `tasks.v3.sqlite`; profile JSON files |
+| `internal/store` | `task-database*`, `json-storage`, `attachment-store`, `message-image-store` | SQLite store, schema-compatible with the Electron app's `tasks.v3.sqlite`, read and written in the generated types (rows keep each record's JSON); profile JSON files |
 | `internal/workspace` | `src/main/workspace` | git, worktrees, diffs, GitHub |
 | `internal/engines/{agent,claude,codex,opencode}` | `src/main/{agent,claude,codex,opencode}`, `engines.mts` | agent sessions and their protocols |
 | `internal/tools` | `src/main/tools` | MCP tool definitions and the MCP HTTP host |
@@ -26,7 +26,7 @@ Go + Wails v2 rewrite of [AI Coding Tool](https://github.com/zyuapp/ai-coding-to
 | `internal/mobile` | `src/main/mobile` | the phone bridge, pairing, Tailscale |
 | `internal/automation` | `src/main/automation` | scheduled automations |
 | `internal/updates` | `updates.ts`, `update-*`, `appimage-update`, `cli-install` | app updates and the `aicodingtool` command |
-| `internal/services` | `main.ts` startup, `service-desktop.ts`, `desktop-events.ts`, `serve.ts` | opens every service on a profile for the window and for `serve`, with the adapters from the service packages' own records to the generated types |
+| `internal/services` | `main.ts` startup, `service-desktop.ts`, `desktop-events.ts`, `serve.ts` | opens every service on a profile (store, workspaces and worktrees, engines, run host, MCP tool host, scheduler, terminals, computer use, CLI install, computer reads) for both the window and `serve`, with the desktop events and the adapters from `internal/workspace`'s own records to the generated types |
 | `internal/desktop` | `window-desktop`, `runtime-desktop`, `service-desktop`, `workspace-runtime-host`, `keyboard-host`, menus, protocols | the Wails glue: implements the ports, serves the window's calls, pushes events |
 
 Packages mirror the TypeScript layers, so imports point the same way: `domain` ← `contracts` ← `application` ← `host` ← everything under `internal/` that implements a port ← `services` ← `desktop` ← `main`. `domain`, `contracts`, `application` and `host` import no OS, Wails or cgo code. Only `engines` reaches into an engine's package; tool definitions import nothing else from the services.
@@ -46,6 +46,7 @@ State is immutable once published, exactly as in TypeScript: the reducer never w
 - Structs are copied by value (`next := *state`); collections of records hold pointers (`[]*Thread`, `map[string]*X`) so unchanged records are shared between versions.
 - Slices and maps are copy-on-write: `slices.Clone` / `maps.Clone` before changing one, never `append` onto a slice from the previous state (use `slices.Clip` or clone).
 - A TypeScript identity check (`next.threads !== previous.threads`) becomes `jsonx.Same(a, b)` (same backing array and length, same map, same pointer).
+- Go backs every zero-capacity slice with one shared address, so two empty slices built apart are the same to `jsonx.Same`, unlike two `[]` literals in TypeScript. A new list whose identity decides something (an effect, a patch) while the old one may be empty too is built with `jsonx.Fresh(n)`, which always has a backing array of its own.
 - `application.Patches(previous, next)` diffs by identity first, as `workspacePatches` does, and writes the same patch shapes (`contracts.WorkspacePatch`).
 
 ## JSON
@@ -80,5 +81,10 @@ A source build keeps its own profile (`AI Coding Tool Go Dev` under the user con
 
 ## Building and checks
 - `wails dev` runs the app with the Vite dev server; `wails build` writes `build/bin`. `scripts/run.sh` builds and runs a dev app with `ACT_PROFILE_DIR` / `ACT_WINDOW_SIZE=WxH`.
+- `scripts/prepare-cua-driver.sh` fetches the pinned Cua Driver into `build/cua-driver`, where a source build runs computer use from.
+- Releases: `scripts/package-mac.sh` / `scripts/package-linux.sh` build the installed app (production identity, helpers, driver, notices), `scripts/release-feed.sh` writes the `latest-*.yml` feed `internal/updates` reads, and `.github/workflows/release.yml` publishes them to `zyuapp/ai-coding-tool-go` releases.
 - `go test ./...`; `cd frontend && npm run check` for the renderer.
-- `scripts/reducer-diff/run.sh` fuzzes `application.Reduce` against the TypeScript reducer (needs `npm run build` in `../ai-coding-tool`); `scripts/command-diff/run.sh` compares command validation.
+- Differential checks against the TypeScript backend. They run a CommonJS build of it named by `TS_DIST` (default `/tmp/goport/tsdist`); the head of `scripts/reducer-diff/run.sh` has the command that builds one. Rebuild it after pulling upstream changes.
+  - `scripts/reducer-diff/run.sh [--seeds 1-50 --steps 400 --cover]` fuzzes `application.Reduce` and the host's projections (`cmd/reduce-lines`) against the TypeScript reducer with the same random inputs, and writes the inputs of the first divergence per seed to `$TRAILS/trail-<seed>.jsonl` (`replay.cjs` replays one).
+  - `scripts/reducer-diff/spec/spec.sh` runs the TypeScript app's own test suite with every reduce, projection and boundary validator also run through Go, and lists where they differ.
+  - `scripts/command-diff/run.sh` compares every command's declaration and its window, agent and phone validation (`cmd/command-check`).

@@ -3,11 +3,14 @@
 package desktop
 
 import (
+	"errors"
 	"os/exec"
 	"slices"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/platform"
 )
 
 const platformName = "linux"
@@ -82,6 +85,18 @@ func (app *App) nativeTitlebarDoubleClick()      { runtime.WindowToggleMaximise(
 func (app *App) nativeSetBackground(r, g, b, a uint8) {
 	runtime.WindowSetBackgroundColour(app.ctx, r, g, b, a)
 }
+
+// nativeOpenLicenses shows the overview in the system's own viewer; Linux has no second web view window.
+func (app *App) nativeOpenLicenses(files licenseDocuments) error {
+	if failure := platform.OpenPath(files.paths[licenseOverview]); failure != "" {
+		return errors.New(failure)
+	}
+	return nil
+}
+
+func (app *App) nativeCloseLicenses() bool { return false }
+
+func pasteboardFiles() []string { return []string{} }
 
 func localFontFamilies() []string {
 	output, err := exec.Command("fc-list", ":", "family").Output()

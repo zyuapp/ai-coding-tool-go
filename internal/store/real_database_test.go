@@ -2,10 +2,12 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json/jsontext"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -44,7 +46,7 @@ const tableDump = `
 	UNION ALL SELECT 'settings', key, '', '', value FROM settings WHERE key = 'lastFolder'
 	ORDER BY 1, 2, 3`
 
-// dump reads every stored row a thread still owns, so two stores can be compared byte for byte.
+// dump reads every stored row a thread still owns, so two stores can be compared.
 func dump(t *testing.T, file string) []string {
 	t.Helper()
 	db := raw(t, file)
@@ -65,7 +67,7 @@ func dump(t *testing.T, file string) []string {
 	return lines
 }
 
-func TestRealDatabaseRoundTripsByteForByte(t *testing.T) {
+func TestRealDatabaseRoundTrips(t *testing.T) {
 	file := fixtureCopy(t)
 	before := dump(t, file)
 	service, err := OpenTaskDatabaseService(file, OpenOptions{CutOverCodexThreads: true})
@@ -90,49 +92,49 @@ func TestRealDatabaseRoundTripsByteForByte(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	delta := TaskStoreDelta{Projects: full.Projects, Worktrees: full.Worktrees, LastFolder: SomeString(full.LastFolder)}
-	for i, value := range full.Tasks {
+	delta := rowDelta{Projects: encodeRows(t, full.Projects), Worktrees: encodeRows(t, full.Worktrees), LastFolder: optionalString{Present: true, Value: full.LastFolder}}
+	for i, value := range encodeRows(t, full.Tasks) {
 		task, _, err := parseObject(value)
 		if err != nil {
 			t.Fatal(err)
 		}
 		id, _ := stringValue(task.get("id"))
-		stored, err := service.LoadThreadMessages(id).Wait()
+		typedMessages, err := service.LoadThreadMessages(id).Wait()
 		if err != nil {
 			t.Fatal(err)
 		}
+		stored := encodeRows(t, typedMessages)
 		loaded, _ := arrayItems(task.get("messages"))
 		if string(joinArray(stored)) != string(joinArray(loaded)) {
 			t.Fatalf("thread %s reads differently on its own", id)
 		}
-		summary, _, _ := parseObject(summaries.Tasks[i])
-		if count := summary.get("historySummary"); count != nil {
-			if want := fmt.Sprint(len(stored)); field(t, count, "messageCount") != want {
-				t.Fatalf("thread %s counts %s messages, holds %s", id, field(t, count, "messageCount"), want)
+		if count := summaries.Tasks[i].HistorySummary; count != nil {
+			if int(count.MessageCount) != len(stored) {
+				t.Fatalf("thread %s counts %v messages, holds %d", id, count.MessageCount, len(stored))
 			}
 		} else if len(stored) != 0 {
 			t.Fatalf("thread %s has messages and no summary", id)
 		}
-		change := TaskChange{Task: task.without("messages").without("subagents").encode()}
+		change := rowChange{Task: task.without("messages").without("subagents").encode()}
 		for index, message := range stored {
-			change.Messages = append(change.Messages, IndexedMessage{Index: float64(index), Message: message})
+			change.Messages = append(change.Messages, rowMessage{Index: float64(index), Message: message})
 		}
 		subagents, _ := arrayItems(task.get("subagents"))
 		for index, value := range subagents {
 			subagent, _, _ := parseObject(value)
 			subagentID, _ := stringValue(subagent.get("id"))
-			change.Subagents = append(change.Subagents, IndexedSubagent{Index: float64(index), Subagent: subagent.without("activity").encode()})
+			change.Subagents = append(change.Subagents, rowSubagent{Index: float64(index), Subagent: subagent.without("activity").encode()})
 			items, err := service.SubagentActivity(id, subagentID).Wait()
 			if err != nil {
 				t.Fatal(err)
 			}
-			for position, item := range items {
-				change.Activity = append(change.Activity, IndexedActivity{SubagentID: subagentID, Index: float64(position), Item: item})
+			for position, item := range encodeRows(t, items) {
+				change.Activity = append(change.Activity, rowActivity{SubagentID: subagentID, Index: float64(position), Item: item})
 			}
 		}
 		delta.Tasks = append(delta.Tasks, change)
 	}
-	if _, err := target.Persist(delta).Wait(); err != nil {
+	if _, err := target.Persist(typedDelta(t, delta)).Wait(); err != nil {
 		t.Fatal(err)
 	}
 	automations, err := service.ListAutomations().Wait()
@@ -148,11 +150,18 @@ func TestRealDatabaseRoundTripsByteForByte(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(joinArray(reloaded.Tasks)) != string(joinArray(summaries.Tasks)) {
+	if string(joinArray(encodeRows(t, reloaded.Tasks))) != string(joinArray(encodeRows(t, summaries.Tasks))) {
 		t.Fatal("the rewritten store loads different summaries")
 	}
-	if string(joinArray(reloaded.Projects)) != string(joinArray(summaries.Projects)) {
+	if string(joinArray(encodeRows(t, reloaded.Projects))) != string(joinArray(encodeRows(t, summaries.Projects))) {
 		t.Fatal("the rewritten store orders projects differently")
+	}
+	rewrittenFull, err := target.Load().Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(joinArray(encodeRows(t, rewrittenFull.Tasks))) != string(joinArray(encodeRows(t, full.Tasks))) {
+		t.Fatal("the rewritten store loads different threads")
 	}
 	originalPaths, _ := service.AttachmentPaths().Wait()
 	copiedPaths, _ := target.AttachmentPaths().Wait()
@@ -171,13 +180,31 @@ func TestRealDatabaseRoundTripsByteForByte(t *testing.T) {
 		t.Fatal("opening and reading the store changed a row")
 	}
 	written := dump(t, rewritten)
-	if !slices.Equal(before, written) {
-		for i := range min(len(before), len(written)) {
-			if before[i] != written[i] {
-				t.Fatalf("first difference:\n%s\n%s", before[i], written[i])
-			}
-		}
+	if len(before) != len(written) {
 		t.Fatalf("%d rows stored, %d rewritten", len(before), len(written))
 	}
-	t.Logf("%d rows identical", len(written))
+	for i := range before {
+		if !sameRow(t, before[i], written[i]) {
+			t.Fatalf("first difference:\n%s\n%s", before[i], written[i])
+		}
+	}
+	t.Logf("%d rows alike", len(written))
+}
+
+// sameRow is whether two dumped rows hold the same keys and the same columns after their JSON. The
+// JSON itself is compared through what each store loads, since reading migrates older records.
+func sameRow(t *testing.T, a, b string) bool {
+	t.Helper()
+	left, right := strings.SplitN(a, " ", 5), strings.SplitN(b, " ", 5)
+	if len(left) != 5 || len(right) != 5 || !slices.Equal(left[:4], right[:4]) {
+		return a == b
+	}
+	rest := func(data string) string {
+		decoder := jsontext.NewDecoder(strings.NewReader(data))
+		if _, err := decoder.ReadValue(); err != nil {
+			t.Fatal(err)
+		}
+		return data[decoder.InputOffset():]
+	}
+	return rest(left[4]) == rest(right[4])
 }

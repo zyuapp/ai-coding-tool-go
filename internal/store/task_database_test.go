@@ -4,9 +4,12 @@ import (
 	"database/sql"
 	"encoding/json/jsontext"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/jsonx"
 )
 
 const summaryTask = `{"id":"summary-thread","title":"Stored history","engine":"codex","executionPolicy":"confirm","continuationStatus":"none","lastChangeSnapshot":{"files":[],"capturedAt":1},"rankedAt":100,"updatedAt":100}`
@@ -41,10 +44,10 @@ func withMember[V ~string | ~[]byte](t *testing.T, value V, name string, member 
 	return record.with(name, jsontext.Value(member)).encode()
 }
 
-func messages(values ...string) []IndexedMessage {
-	indexed := make([]IndexedMessage, len(values))
+func messages(values ...string) []rowMessage {
+	indexed := make([]rowMessage, len(values))
 	for i, value := range values {
-		indexed[i] = IndexedMessage{Index: float64(i), Message: jsontext.Value(value)}
+		indexed[i] = rowMessage{Index: float64(i), Message: jsontext.Value(value)}
 	}
 	return indexed
 }
@@ -58,20 +61,43 @@ func field(t *testing.T, value jsontext.Value, name string) string {
 	return string(record.get(name))
 }
 
-func persist(t *testing.T, database *TaskDatabase, delta TaskStoreDelta) {
+func persist(t *testing.T, database *TaskDatabase, delta rowDelta) {
 	t.Helper()
 	if err := database.Persist(delta); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func load(t *testing.T, database *TaskDatabase, summariesOnly bool) *LoadedTaskStore {
+// loadedRows is a loaded store with each record encoded, as a row holds it.
+type loadedRows struct {
+	Tasks, Projects, Worktrees []jsontext.Value
+	LastFolder                 *string
+	UnloadedTaskIDs            []string
+}
+
+func load(t *testing.T, database *TaskDatabase, summariesOnly bool) *loadedRows {
 	t.Helper()
 	loaded, err := database.Load(summariesOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return loaded
+	if loaded == nil {
+		return nil
+	}
+	return &loadedRows{Tasks: encodeRows(t, loaded.Tasks), Projects: encodeRows(t, loaded.Projects), Worktrees: encodeRows(t, loaded.Worktrees), LastFolder: loaded.LastFolder, UnloadedTaskIDs: loaded.UnloadedTaskIDs}
+}
+
+func encodeRows[T any](t *testing.T, values []*T) []jsontext.Value {
+	t.Helper()
+	rows := make([]jsontext.Value, len(values))
+	for i, value := range values {
+		data, err := jsonx.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows[i] = data
+	}
+	return rows
 }
 
 func ids(t *testing.T, records []jsontext.Value) []string {
@@ -89,7 +115,7 @@ func TestCodexCutoverKeepsClaudeDataAcrossRestarts(t *testing.T) {
 	database := openTest(t, file, OpenOptions{})
 	claude := withMember(t, withMember(t, withMember(t, withMember(t, summaryTask, "id", `"claude"`), "engine", `"claude"`), "continuation", `{"provider":"codex","value":"old-shared-id"}`), "continuationStatus", `"available"`)
 	message := `{"id":"kept","kind":"user","text":"Claude history","at":10}`
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(summaryTask)}, {Task: claude, Messages: messages(message)}}})
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(summaryTask)}, {Task: claude, Messages: messages(message)}}})
 	if err := database.CutOverCodexThreads(); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +129,7 @@ func TestCodexCutoverKeepsClaudeDataAcrossRestarts(t *testing.T) {
 	if got := field(t, kept[0], "continuationStatus"); got != `"none"` {
 		t.Fatalf("continuationStatus %s", got)
 	}
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: withMember(t, summaryTask, "id", `"private-codex"`)}}})
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: withMember(t, summaryTask, "id", `"private-codex"`)}}})
 	database.Close()
 	database = openTest(t, file, OpenOptions{CutOverCodexThreads: true})
 	got := ids(t, load(t, database, false).Tasks)
@@ -120,7 +146,7 @@ func TestSummariesCountHistoryWhileMessagesLoadOnDemand(t *testing.T) {
 		`{"id":"answer","kind":"assistant","text":"Answer","at":20,"attachments":["picture.png"]}`,
 		`{"id":"quiet","kind":"assistant","text":"Nothing changed","at":30,"withdrawn":true}`,
 	}
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(summaryTask), Messages: messages(stored...)}}})
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(summaryTask), Messages: messages(stored...)}}})
 	summary := load(t, database, true)
 	if !slices.Equal(summary.UnloadedTaskIDs, []string{"summary-thread"}) {
 		t.Fatalf("unloaded %v", summary.UnloadedTaskIDs)
@@ -137,24 +163,24 @@ func TestSummariesCountHistoryWhileMessagesLoadOnDemand(t *testing.T) {
 			t.Fatal(err)
 		}
 		var texts []string
-		for _, value := range values {
+		for _, value := range encodeRows(t, values) {
 			texts = append(texts, string(value))
 		}
 		return texts
 	}
-	if got := read(); !slices.Equal(got, stored) {
+	if got := read(); !sameJSON(t, "["+strings.Join(got, ",")+"]", "["+strings.Join(stored, ",")+"]") {
 		t.Fatalf("messages %v", got)
 	}
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: withMember(t, summaryTask, "title", `"Renamed before opening"`)}}})
-	if got := read(); !slices.Equal(got, stored) {
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: withMember(t, summaryTask, "title", `"Renamed before opening"`)}}})
+	if got := read(); !sameJSON(t, "["+strings.Join(got, ",")+"]", "["+strings.Join(stored, ",")+"]") {
 		t.Fatalf("a summary-only rename keeps all stored messages: %v", got)
 	}
 	withdrawn := `{"id":"answer","kind":"assistant","text":"Answer","at":20,"attachments":[],"withdrawn":true}`
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(summaryTask), Messages: []IndexedMessage{{Index: 1, Message: jsontext.Value(withdrawn)}}}}})
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(summaryTask), Messages: []rowMessage{{Index: 1, Message: jsontext.Value(withdrawn)}}}}})
 	if got := field(t, load(t, database, true).Tasks[0], "historySummary"); got != `{"messageCount":3,"attachmentCount":0,"firstMessageAt":10,"lastAudibleAt":10}` {
 		t.Fatalf("updating a message changes summary counts without duplicating it: %s", got)
 	}
-	persist(t, database, TaskStoreDelta{RemovedTasks: []string{"summary-thread"}})
+	persist(t, database, rowDelta{RemovedTasks: []string{"summary-thread"}})
 	if got := load(t, database, true); got != nil {
 		t.Fatalf("loaded %v", got)
 	}
@@ -170,7 +196,7 @@ func TestSearchMatchesStoredTextCaseInsensitivelyAndSkipsUnreadableRows(t *testi
 		return `{"id":"` + id + `","kind":"assistant","text":` + string(jsString(text)) + `,"at":1}`
 	}
 	task := func(id string) jsontext.Value { return withMember(t, summaryTask, "id", string(jsString(id))) }
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{
+	persist(t, database, rowDelta{Tasks: []rowChange{
 		{Task: jsontext.Value(summaryTask), Messages: messages(message("a", "Found the ÜBER Needle"), message("b", "needle again"))},
 		{Task: task("other"), Messages: messages(message("c", "Nothing here"))},
 		{Task: task("outside"), Messages: messages(message("d", "needle"))},
@@ -227,7 +253,7 @@ func TestExistingDatabasesGainHistoryMetadata(t *testing.T) {
 func TestUnreadableBodiesFailHydrationWithoutBlockingSummaries(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.sqlite")
 	database := openTest(t, file, OpenOptions{})
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(summaryTask), Messages: messages(`{"id":"broken","kind":"user","text":"Saved","at":1}`)}}})
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(summaryTask), Messages: messages(`{"id":"broken","kind":"user","text":"Saved","at":1}`)}}})
 	if _, err := raw(t, file).Exec("UPDATE messages SET data = ?", "{broken json"); err != nil {
 		t.Fatal(err)
 	}
@@ -244,14 +270,14 @@ func TestMessagesAreUpdatedInPlace(t *testing.T) {
 	database := openTest(t, filepath.Join(t.TempDir(), "tasks.sqlite"), OpenOptions{})
 	task := `{"id":"task-1","title":"Render markdown","engine":"claude","executionPolicy":"confirm","continuationStatus":"none","lastChangeSnapshot":{"files":[],"capturedAt":1},"rankedAt":2,"updatedAt":2}`
 	folder := "/work"
-	persist(t, database, TaskStoreDelta{
+	persist(t, database, rowDelta{
 		Projects:   []jsontext.Value{jsontext.Value(`{"id":"project-1","root":"/work"}`)},
-		LastFolder: SomeString(&folder),
-		Tasks:      []TaskChange{{Task: jsontext.Value(task), Messages: messages(`{"id":"user-1","kind":"user","text":"Hello","at":1}`, `{"id":"assistant-1","kind":"assistant","text":"First","at":2}`)}},
+		LastFolder: optionalString{Present: true, Value: &folder},
+		Tasks:      []rowChange{{Task: jsontext.Value(task), Messages: messages(`{"id":"user-1","kind":"user","text":"Hello","at":1}`, `{"id":"assistant-1","kind":"assistant","text":"First","at":2}`)}},
 	})
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{
+	persist(t, database, rowDelta{Tasks: []rowChange{{
 		Task:     withMember(t, task, "updatedAt", "3"),
-		Messages: []IndexedMessage{{Index: 1, Message: jsontext.Value(`{"id":"assistant-1","kind":"assistant","text":"First\nSecond","at":2}`)}},
+		Messages: []rowMessage{{Index: 1, Message: jsontext.Value(`{"id":"assistant-1","kind":"assistant","text":"First\nSecond","at":2}`)}},
 	}}})
 	loaded := load(t, database, false)
 	if loaded.LastFolder == nil || *loaded.LastFolder != "/work" {
@@ -273,26 +299,26 @@ func TestSubagentActivityKeepsRowsOfItsOwn(t *testing.T) {
 	database := openTest(t, file, OpenOptions{})
 	task := `{"id":"task-1","title":"Delegate","engine":"claude","executionPolicy":"confirm","continuationStatus":"none","lastChangeSnapshot":{"files":[],"capturedAt":1},"rankedAt":2,"updatedAt":2}`
 	subagent := `{"id":"agent-1","description":"Explore","status":"working","startedAt":1,"model":"claude-sonnet","effort":"high","prompt":"  Exact\nprompt  "}`
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{
+	persist(t, database, rowDelta{Tasks: []rowChange{{
 		Task:      jsontext.Value(task),
-		Subagents: []IndexedSubagent{{Index: 0, Subagent: jsontext.Value(subagent)}},
-		Activity:  []IndexedActivity{{SubagentID: "agent-1", Index: 0, Item: jsontext.Value(`{"id":"activity-1","kind":"text","text":"Reading","at":1}`)}},
+		Subagents: []rowSubagent{{Index: 0, Subagent: jsontext.Value(subagent)}},
+		Activity:  []rowActivity{{SubagentID: "agent-1", Index: 0, Item: jsontext.Value(`{"id":"activity-1","kind":"text","text":"Reading","at":1}`)}},
 	}}})
 	completed := withMember(t, withMember(t, subagent, "status", `"completed"`), "finishedAt", "4")
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{
+	persist(t, database, rowDelta{Tasks: []rowChange{{
 		Task:      withMember(t, task, "updatedAt", "3"),
-		Subagents: []IndexedSubagent{{Index: 0, Subagent: completed}},
-		Activity:  []IndexedActivity{{SubagentID: "agent-1", Index: 1, Item: jsontext.Value(`{"id":"activity-2","kind":"tool","title":"Grep","text":"hits","at":2}`)}},
+		Subagents: []rowSubagent{{Index: 0, Subagent: completed}},
+		Activity:  []rowActivity{{SubagentID: "agent-1", Index: 1, Item: jsontext.Value(`{"id":"activity-2","kind":"tool","title":"Grep","text":"hits","at":2}`)}},
 	}}})
 	loaded := load(t, database, false)
-	if got := field(t, loaded.Tasks[0], "subagents"); got != `[{"id":"agent-1","description":"Explore","status":"completed","startedAt":1,"model":"claude-sonnet","effort":"high","prompt":"  Exact\nprompt  ","finishedAt":4,"activity":[]}]` {
+	if got := field(t, loaded.Tasks[0], "subagents"); !sameJSON(t, got, `[{"id":"agent-1","description":"Explore","status":"completed","startedAt":1,"model":"claude-sonnet","effort":"high","prompt":"  Exact\nprompt  ","finishedAt":4,"activity":[]}]`) {
 		t.Fatalf("subagents %s", got)
 	}
 	activity, err := database.SubagentActivity("task-1", "agent-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ids(t, activity); !slices.Equal(got, []string{"activity-1", "activity-2"}) {
+	if got := ids(t, encodeRows(t, activity)); !slices.Equal(got, []string{"activity-1", "activity-2"}) {
 		t.Fatalf("activity %v", got)
 	}
 	var data string
@@ -309,7 +335,7 @@ func TestEmbeddedSubagentsAreLiftedIntoRows(t *testing.T) {
 	legacy := openTest(t, file, OpenOptions{})
 	activity := `[{"id":"activity-1","kind":"text","text":"Reading","at":1}]`
 	task := `{"id":"task-1","title":"Delegate","engine":"claude","executionPolicy":"confirm","continuationStatus":"none","lastChangeSnapshot":{"files":[],"capturedAt":1},"rankedAt":2,"updatedAt":2,"subagents":[{"id":"agent-1","description":"Explore","status":"completed","startedAt":1,"finishedAt":2,"activity":` + activity + `}]}`
-	persist(t, legacy, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(task)}}})
+	persist(t, legacy, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(task)}}})
 	legacy.Close()
 
 	database := openTest(t, file, OpenOptions{})
@@ -320,7 +346,7 @@ func TestEmbeddedSubagentsAreLiftedIntoRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(joinArray(items)); got != activity {
+	if got := string(joinArray(encodeRows(t, items))); got != activity {
 		t.Fatalf("activity %s", got)
 	}
 	var data string
@@ -386,12 +412,12 @@ func TestFoldersInsideWorktreeRootsAreRefusedAndTheRestLands(t *testing.T) {
 	database := openTest(t, filepath.Join(directory, "tasks.sqlite"), OpenOptions{WorktreesRoots: []string{worktreesRoot, legacyRoot}})
 	task := `{"id":"task-1","title":"Worktree work","engine":"claude","executionPolicy":"confirm","continuationStatus":"none","lastChangeSnapshot":{"files":[],"capturedAt":1},"rankedAt":2,"updatedAt":2}`
 	work := "/work"
-	persist(t, database, TaskStoreDelta{Projects: []jsontext.Value{jsontext.Value(`{"id":"project-1","root":"/work"}`)}, LastFolder: SomeString(&work), Tasks: []TaskChange{{Task: jsontext.Value(task)}}})
+	persist(t, database, rowDelta{Projects: []jsontext.Value{jsontext.Value(`{"id":"project-1","root":"/work"}`)}, LastFolder: optionalString{Present: true, Value: &work}, Tasks: []rowChange{{Task: jsontext.Value(task)}}})
 	inside := filepath.Join(legacyRoot, "work-9aefd881")
-	persist(t, database, TaskStoreDelta{
+	persist(t, database, rowDelta{
 		Projects:   []jsontext.Value{withMember(t, `{"id":"project-1"}`, "root", string(jsString(filepath.Join(worktreesRoot, "work-9aefd881"))))},
-		LastFolder: SomeString(&inside),
-		Tasks:      []TaskChange{{Task: withMember(t, task, "updatedAt", "3"), Messages: messages(`{"id":"user-1","kind":"user","text":"Still saved","at":1}`)}},
+		LastFolder: optionalString{Present: true, Value: &inside},
+		Tasks:      []rowChange{{Task: withMember(t, task, "updatedAt", "3"), Messages: messages(`{"id":"user-1","kind":"user","text":"Still saved","at":1}`)}},
 	})
 	loaded := load(t, database, false)
 	if got := string(joinArray(loaded.Projects)); got != `[{"id":"project-1","root":"/work"}]` {
@@ -405,7 +431,7 @@ func TestFoldersInsideWorktreeRootsAreRefusedAndTheRestLands(t *testing.T) {
 	}
 
 	sibling := worktreesRoot + "-mine"
-	persist(t, database, TaskStoreDelta{Projects: []jsontext.Value{withMember(t, `{"id":"project-1"}`, "root", string(jsString(sibling)))}})
+	persist(t, database, rowDelta{Projects: []jsontext.Value{withMember(t, `{"id":"project-1"}`, "root", string(jsString(sibling)))}})
 	if got := field(t, load(t, database, false).Projects[0], "root"); got != string(jsString(sibling)) {
 		t.Fatalf("a folder that merely starts with the root's name is allowed: %s", got)
 	}
@@ -425,9 +451,9 @@ func TestEmbeddedCheckoutIsLiftedIntoItsOwnRecord(t *testing.T) {
 	before.Close()
 
 	database := openTest(t, file, OpenOptions{})
-	persist(t, database, TaskStoreDelta{Projects: []jsontext.Value{jsontext.Value(`{"id":"project-1","root":"/repo"}`)}})
+	persist(t, database, rowDelta{Projects: []jsontext.Value{jsontext.Value(`{"id":"project-1","root":"/repo"}`)}})
 	loaded := load(t, database, false)
-	if got := string(joinArray(loaded.Worktrees)); got != `[{`+checkout+`,"projectId":"project-1"}]` {
+	if got := string(joinArray(loaded.Worktrees)); !sameJSON(t, got, `[{`+checkout+`,"projectId":"project-1"}]`) {
 		t.Fatalf("the checkout is filed under the project its thread was in: %s", got)
 	}
 	task, _, _ := parseObject(loaded.Tasks[0])
@@ -439,7 +465,7 @@ func TestEmbeddedCheckoutIsLiftedIntoItsOwnRecord(t *testing.T) {
 func TestWithdrawnMessagesAreQuietUnderEitherName(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "tasks.sqlite")
 	database := openTest(t, file, OpenOptions{})
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(summaryTask), Messages: messages(
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(summaryTask), Messages: messages(
 		`{"id":"label","kind":"user","text":"Poll","detail":"Automation run #2","withdrawn":true,"at":10}`,
 		`{"id":"reply","kind":"assistant","text":"Nothing new","quiet":true,"at":11}`,
 		`{"id":"spoken","kind":"assistant","text":"Something new","withdrawn":false,"quiet":true,"at":12}`,
@@ -462,7 +488,7 @@ func TestWithdrawnMessagesAreQuietUnderEitherName(t *testing.T) {
 
 func TestAttachmentPathsNameEveryImageOnce(t *testing.T) {
 	database := openTest(t, filepath.Join(t.TempDir(), "tasks.sqlite"), OpenOptions{})
-	persist(t, database, TaskStoreDelta{Tasks: []TaskChange{{Task: jsontext.Value(summaryTask), Messages: messages(
+	persist(t, database, rowDelta{Tasks: []rowChange{{Task: jsontext.Value(summaryTask), Messages: messages(
 		`{"id":"first","kind":"user","text":"Look","attachments":["/data/attachments/a.png","/data/attachments/b.png"],"at":10}`,
 		`{"id":"second","kind":"user","text":"Again","attachments":["/data/attachments/a.png"],"at":11}`,
 		`{"id":"third","kind":"assistant","text":"Seen","at":12}`,
@@ -475,7 +501,7 @@ func TestAttachmentPathsNameEveryImageOnce(t *testing.T) {
 	if !slices.Equal(paths, []string{"/data/attachments/a.png", "/data/attachments/b.png"}) {
 		t.Fatalf("paths %v", paths)
 	}
-	persist(t, database, TaskStoreDelta{RemovedTasks: []string{"summary-thread"}})
+	persist(t, database, rowDelta{RemovedTasks: []string{"summary-thread"}})
 	if paths, _ := database.AttachmentPaths(); len(paths) != 0 {
 		t.Fatalf("paths %v", paths)
 	}
@@ -501,8 +527,12 @@ func TestTypedDeltasEncodeOnTheStoresGoroutine(t *testing.T) {
 		Tasks    []change `json:"tasks"`
 		Projects []any    `json:"projects"`
 	}
+	var typedTask map[string]any
+	if err := jsonx.Unmarshal(withMember(t, summaryTask, "id", `"typed"`), &typedTask); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.Persist(delta{Tasks: []change{{
-		Task:     map[string]any{"id": "typed", "updatedAt": 1},
+		Task:     typedTask,
 		Messages: []indexed{{Index: 0, Message: message{ID: "m", Kind: "user", Text: "<b> & é", At: 1}}},
 	}}, Projects: []any{}}); err != nil {
 		t.Fatal(err)
@@ -518,4 +548,17 @@ func TestOpeningInAMissingFolderFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unable to open database") {
 		t.Fatalf("err %v", err)
 	}
+}
+
+// sameJSON is whether two JSON texts hold the same values, whatever order their keys are in.
+func sameJSON(t *testing.T, a, b string) bool {
+	t.Helper()
+	var left, right any
+	if err := jsonx.Unmarshal([]byte(a), &left); err != nil {
+		t.Fatal(err)
+	}
+	if err := jsonx.Unmarshal([]byte(b), &right); err != nil {
+		t.Fatal(err)
+	}
+	return reflect.DeepEqual(left, right)
 }

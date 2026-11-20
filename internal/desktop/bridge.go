@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 // Channels the desktop pushes at the window, as preload.ts listens on them.
@@ -170,7 +172,7 @@ func (bridge *Bridge) run(name string, args []jsontext.Value) Reply {
 	app := bridge.app
 	switch name {
 	case CallSetTheme:
-		var theme WindowTheme
+		var theme contracts.WindowTheme
 		if err := json.Unmarshal(args[0], &theme); err != nil {
 			return Settled(nil, err)
 		}
@@ -296,6 +298,9 @@ func (bridge *Bridge) Loaded() { bridge.app.pageLoaded() }
 
 // TitlebarDoubleClick does what the system does for a double-click on a title bar.
 func (bridge *Bridge) TitlebarDoubleClick() { bridge.app.nativeTitlebarDoubleClick() }
+
+// PasteboardFiles lists the paths of the files on the clipboard, for pathForFile on a paste.
+func (bridge *Bridge) PasteboardFiles() []string { return pasteboardFiles() }
 
 // LocalFonts lists the font families installed on this machine, for the font picker.
 func (bridge *Bridge) LocalFonts() []string { return localFontFamilies() }

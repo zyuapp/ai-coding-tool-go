@@ -190,21 +190,21 @@ func sameValue(a, b reflect.Value) bool {
 	return a.Equal(b)
 }
 
-// jobQueue holds work for the goroutine that owns the state, in the order it arrived. Posting never
-// blocks, so work may be posted from that goroutine too.
+// jobQueue runs work one job at a time, in the order it arrived, on a goroutine that lives while work
+// is queued. Posting never blocks, so work may be posted from a job too.
 type jobQueue struct {
-	mu    sync.Mutex
-	items []func()
-	wake  chan struct{}
+	mu      sync.Mutex
+	items   []func()
+	running bool
 }
 
 func (q *jobQueue) post(job func()) {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.items = append(q.items, job)
-	q.mu.Unlock()
-	select {
-	case q.wake <- struct{}{}:
-	default:
+	if !q.running {
+		q.running = true
+		go q.run()
 	}
 }
 
@@ -212,9 +212,10 @@ func (q *jobQueue) run() {
 	for {
 		q.mu.Lock()
 		if len(q.items) == 0 {
+			q.running = false
+			q.items = nil
 			q.mu.Unlock()
-			<-q.wake
-			continue
+			return
 		}
 		job := q.items[0]
 		q.items[0] = nil
@@ -275,8 +276,8 @@ func CreateWorkspaceRuntime(host WorkspaceRuntimeHost) *Runtime {
 	r := &Runtime{
 		host:                 host,
 		desktop:              host.Desktop,
-		jobs:                 &jobQueue{wake: make(chan struct{}, 1)},
-		ordered:              &jobQueue{wake: make(chan struct{}, 1)},
+		jobs:                 &jobQueue{},
+		ordered:              &jobQueue{},
 		loaded:               deferred(),
 		listeners:            map[int]func(){},
 		badgeCount:           -1,
@@ -314,8 +315,6 @@ func CreateWorkspaceRuntime(host WorkspaceRuntimeHost) *Runtime {
 			trackUntilSettled(r.effects, func() { _, _ = completed(background) })
 		},
 	})
-	go r.jobs.run()
-	go r.ordered.run()
 	return r
 }
 

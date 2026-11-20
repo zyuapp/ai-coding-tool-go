@@ -161,6 +161,13 @@ func TestSame(t *testing.T) {
 	if !Same(x, y) || Same[change](x, removed{}) || Same[change](nil, x) || !Same[change](nil, nil) {
 		t.Error("interfaces")
 	}
+	if Same([]int{}, make([]int, 0)) == Same(Fresh[int](0), Fresh[int](0)) {
+		t.Error("only fresh empty slices have an identity of their own")
+	}
+	empty := Fresh[int](0)
+	if !Same(empty, empty) {
+		t.Error("an unchanged fresh slice")
+	}
 	var r1, r2 change = removed{IDs: []string{"a"}}, removed{IDs: []string{"a"}}
 	if Same(r1, r2) {
 		t.Error("incomparable values are never the same")

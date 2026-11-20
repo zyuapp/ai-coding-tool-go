@@ -12,9 +12,6 @@ import (
 	"github.com/zyuapp/ai-coding-tool-go/internal/engines/claude/protocol"
 )
 
-// appPluginName is the plugin name both engines qualify the app's skills with.
-const appPluginName = "aicodingtool"
-
 // coordinatorTools are the only built-in tools a coordinator gets: it reads and searches, and runs no
 // agents inside its own session. Named rather than withheld, so a tool a newer Claude Code adds never
 // reaches a coordinator unasked. Its app tools are MCP servers, which this list leaves alone.
@@ -32,11 +29,6 @@ const chromeInstructions = `The user's own Chrome answers the mcp__claude-in-chr
 
 const contextBeta = "context-1m-2025-08-07"
 
-// unqualifiedSkillName reads `aicodingtool:review-thread` and `review-thread` as the same app skill.
-func unqualifiedSkillName(name string) string {
-	return strings.TrimPrefix(name, appPluginName+":")
-}
-
 func appPlugins(root string) []protocol.Plugin {
 	if root == "" {
 		return nil
@@ -46,12 +38,12 @@ func appPlugins(root string) []protocol.Plugin {
 
 // appCommand offers the app's own skills by their alias: Claude qualifies a plugin skill as `plugin:skill`.
 func appCommand(command protocol.SlashCommand) *contracts.AvailableCommand {
-	if !strings.HasPrefix(command.Name, appPluginName+":") {
+	if !strings.HasPrefix(command.Name, agent.AppPluginName+":") {
 		return &contracts.AvailableCommand{Name: command.Name, Description: command.Description, ArgumentHint: command.ArgumentHint, Aliases: command.Aliases}
 	}
 	return &contracts.AvailableCommand{
-		Name:         unqualifiedSkillName(command.Name),
-		Description:  strings.Replace(command.Description, "("+appPluginName+") ", "", 1),
+		Name:         agent.UnqualifiedSkillName(command.Name),
+		Description:  strings.Replace(command.Description, "("+agent.AppPluginName+") ", "", 1),
 		ArgumentHint: command.ArgumentHint,
 	}
 }

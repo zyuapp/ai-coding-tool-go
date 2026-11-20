@@ -17,6 +17,8 @@ import (
 	"sync"
 
 	"github.com/mattn/go-sqlite3"
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
+	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
 )
 
 // TaskDatabaseFile is the profile's thread store.
@@ -133,7 +135,6 @@ type OpenOptions struct {
 	// CutOverCodexThreads runs the one-time cutover to Codex's private home, as the worker did when
 	// PRIVATE_CODEX_HOME_ENV was set.
 	CutOverCodexThreads bool
-	Domain              Domain
 	// JSON encodes deltas and automations handed over as typed values.
 	JSON []json.Options
 }
@@ -144,7 +145,6 @@ type TaskDatabase struct {
 	db             *sql.DB
 	conn           *sql.Conn
 	worktreesRoots []string
-	domain         Domain
 	jsonOptions    []json.Options
 	saveTask       *sql.Stmt
 	saveMessage    *sql.Stmt
@@ -170,7 +170,7 @@ func OpenTaskDatabase(file string, options OpenOptions) (*TaskDatabase, error) {
 		db.Close()
 		return nil, err
 	}
-	database := &TaskDatabase{db: db, conn: conn, worktreesRoots: options.WorktreesRoots, domain: options.Domain, jsonOptions: options.JSON}
+	database := &TaskDatabase{db: db, conn: conn, worktreesRoots: options.WorktreesRoots, jsonOptions: options.JSON}
 	if err := database.open(options); err != nil {
 		database.Close()
 		return nil, err
@@ -507,7 +507,7 @@ func (d *TaskDatabase) Close() error {
 
 // Load reads the stored workspace, or nil when nothing was ever stored. With summariesOnly every
 // conversation stays on disk and each thread that has one carries a historySummary instead.
-func (d *TaskDatabase) Load(summariesOnly bool) (*LoadedTaskStore, error) {
+func (d *TaskDatabase) Load(summariesOnly bool) (*contracts.LoadedTaskStore, error) {
 	taskRecords, err := d.taskRows()
 	if err != nil {
 		return nil, err
@@ -589,59 +589,31 @@ func (d *TaskDatabase) Load(summariesOnly bool) (*LoadedTaskStore, error) {
 			return nil, err
 		}
 	}
-	decoded := DecodedThreadStore{Projects: projects, Worktrees: worktrees, LastFolder: lastFolder}
+	decoded := decodedThreadStore{Projects: projects, Worktrees: worktrees, LastFolder: lastFolder}
 	for _, task := range tasks {
 		decoded.Tasks = append(decoded.Tasks, task.record)
 	}
-	validate := d.domain.ValidateThreadStore
-	if validate == nil {
-		validate = passThroughThreadStore
-	}
-	data, hidden, errs := validate(decoded)
+	data, hidden, errs := validateThreadStore(decoded)
 	if len(errs) > 0 {
 		return nil, errors.New(strings.Join(errs, " "))
 	}
-	result := &LoadedTaskStore{ThreadStoreData: data, HiddenTasks: float64(hidden)}
+	result := &contracts.LoadedTaskStore{ThreadStoreData: *data, HiddenTasks: float64(hidden)}
 	if summariesOnly {
 		summaries, err := d.historySummaries()
 		if err != nil {
 			return nil, err
 		}
 		result.UnloadedTaskIDs = []string{}
-		result.Tasks = slices.Clone(result.Tasks)
-		for i, value := range result.Tasks {
-			task, _, err := parseObject(value)
-			if err != nil {
-				return nil, err
-			}
-			id, _ := stringValue(task.get("id"))
-			summary, ok := summaries[id]
+		for _, task := range result.Tasks {
+			summary, ok := summaries[task.ID]
 			if !ok {
 				continue
 			}
-			result.UnloadedTaskIDs = append(result.UnloadedTaskIDs, id)
-			encoded, err := json.Marshal(summary)
-			if err != nil {
-				return nil, err
-			}
-			result.Tasks[i] = task.with("historySummary", encoded).encode()
+			result.UnloadedTaskIDs = append(result.UnloadedTaskIDs, task.ID)
+			task.HistorySummary = &summary
 		}
 	}
 	return result, nil
-}
-
-// passThroughThreadStore stands in for validateThreadStoreData when no domain is given: it
-// checks only the shape of the lists and the last folder.
-func passThroughThreadStore(values DecodedThreadStore) (ThreadStoreData, int, []string) {
-	data := ThreadStoreData{Version: 2, Tasks: values.Tasks, Projects: values.Projects, Worktrees: values.Worktrees}
-	if string(values.LastFolder) != "null" {
-		folder, ok := stringValue(values.LastFolder)
-		if !ok {
-			return ThreadStoreData{}, 0, []string{"v2 lastFolder must be a string or null"}
-		}
-		data.LastFolder = &folder
-	}
-	return data, 0, nil
 }
 
 func (d *TaskDatabase) eachRow(query string, each func(key string, data []byte) error, args ...any) error {
@@ -684,13 +656,13 @@ func (d *TaskDatabase) jsonRows(query string, args ...any) ([]jsontext.Value, er
 	return values, rows.Err()
 }
 
-func (d *TaskDatabase) historySummaries() (map[string]HistorySummary, error) {
+func (d *TaskDatabase) historySummaries() (map[string]domain.StoredThreadHistorySummary, error) {
 	rows, err := d.conn.QueryContext(background, historySummariesSQL)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	summaries := map[string]HistorySummary{}
+	summaries := map[string]domain.StoredThreadHistorySummary{}
 	for rows.Next() {
 		var id string
 		var messageCount, attachmentCount float64
@@ -698,7 +670,7 @@ func (d *TaskDatabase) historySummaries() (map[string]HistorySummary, error) {
 		if err := rows.Scan(&id, &messageCount, &attachmentCount, &firstAt, &lastAt); err != nil {
 			return nil, err
 		}
-		summaries[id] = HistorySummary{
+		summaries[id] = domain.StoredThreadHistorySummary{
 			MessageCount:    messageCount,
 			AttachmentCount: attachmentCount,
 			FirstMessageAt:  sqlNumberValue(firstAt),
@@ -739,7 +711,7 @@ func (d *TaskDatabase) AttachmentPaths() ([]string, error) {
 }
 
 // LoadThreadMessages reads a thread's whole conversation, oldest first.
-func (d *TaskDatabase) LoadThreadMessages(taskID string) ([]jsontext.Value, error) {
+func (d *TaskDatabase) LoadThreadMessages(taskID string) ([]*domain.ConversationMessage, error) {
 	var exists int
 	if err := d.conn.QueryRowContext(background, "SELECT 1 FROM tasks WHERE id = ?", taskID).Scan(&exists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -751,10 +723,7 @@ func (d *TaskDatabase) LoadThreadMessages(taskID string) ([]jsontext.Value, erro
 	if err != nil {
 		return nil, err
 	}
-	if d.domain.ParseStoredMessages != nil {
-		return d.domain.ParseStoredMessages(messages)
-	}
-	return messages, nil
+	return parseStoredMessages(messages)
 }
 
 // SearchThreadMessages names which of these threads have a stored message whose text contains
@@ -778,8 +747,12 @@ func (d *TaskDatabase) SearchThreadMessages(search string, taskIDs []string) ([]
 
 // SubagentActivity reads a subagent's activity, only when someone opens it: a session's logs never
 // all fit in the window.
-func (d *TaskDatabase) SubagentActivity(taskID, subagentID string) ([]jsontext.Value, error) {
-	return d.jsonRows("SELECT data FROM subagent_activity WHERE task_id = ? AND subagent_id = ? ORDER BY position", taskID, subagentID)
+func (d *TaskDatabase) SubagentActivity(taskID, subagentID string) ([]*domain.SubagentActivity, error) {
+	items, err := d.jsonRows("SELECT data FROM subagent_activity WHERE task_id = ? AND subagent_id = ? ORDER BY position", taskID, subagentID)
+	if err != nil {
+		return nil, err
+	}
+	return decodeEach[domain.SubagentActivity](items)
 }
 
 // ProjectRootsAreOwn is whether no project folder lies inside any root the app has made
@@ -808,7 +781,7 @@ func resolvePath(path string) string {
 	return filepath.Clean(path)
 }
 
-// Persist writes a delta in one transaction. delta is a TaskStoreDelta, or a value that encodes to
+// Persist writes a delta in one transaction. delta is a contracts.TaskStoreDelta, or a value that encodes to
 // one. A project row and the last folder are where the user's own directories are recorded, so a
 // delta that would move either into the app's worktrees is dropped instead of written. The rest of
 // the delta still lands: losing transcripts is a worse answer than keeping the folder on disk.
@@ -897,7 +870,7 @@ func (d *TaskDatabase) Persist(value any) error {
 	})
 }
 
-func (d *TaskDatabase) persistChange(change TaskChange) error {
+func (d *TaskDatabase) persistChange(change rowChange) error {
 	taskID, err := memberBinding(change.Task, "id")
 	if err != nil {
 		return err
@@ -1015,18 +988,18 @@ func (d *TaskDatabase) encode(value any) (jsontext.Value, error) {
 	return json.Marshal(value, d.jsonOptions...)
 }
 
-func (d *TaskDatabase) delta(value any) (*TaskStoreDelta, error) {
+func (d *TaskDatabase) delta(value any) (*rowDelta, error) {
 	switch typed := value.(type) {
-	case *TaskStoreDelta:
+	case *rowDelta:
 		return typed, nil
-	case TaskStoreDelta:
+	case rowDelta:
 		return &typed, nil
 	}
 	data, err := d.encode(value)
 	if err != nil {
 		return nil, err
 	}
-	delta := &TaskStoreDelta{}
+	delta := &rowDelta{}
 	if err := json.Unmarshal(data, delta); err != nil {
 		return nil, err
 	}

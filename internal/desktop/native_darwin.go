@@ -170,3 +170,38 @@ func localFontFamilies() []string {
 	defer C.free(unsafe.Pointer(list))
 	return strings.Split(C.GoString(list), "\n")
 }
+
+func pasteboardFiles() []string {
+	list := C.actPasteboardFiles()
+	if list == nil {
+		return []string{}
+	}
+	defer C.free(unsafe.Pointer(list))
+	if C.GoString(list) == "" {
+		return []string{}
+	}
+	return strings.Split(C.GoString(list), "\n")
+}
+
+//export actLicenseResponse
+func actLicenseResponse(address *C.char) C.ActLicenseAnswer {
+	answer := servedLicense(C.GoString(address))
+	out := C.ActLicenseAnswer{
+		status:      C.int(answer.status),
+		contentType: C.CString(answer.contentType),
+		body:        C.CBytes(answer.body),
+		length:      C.int(len(answer.body)),
+	}
+	if answer.csp != "" {
+		out.csp = C.CString(answer.csp)
+	}
+	return out
+}
+
+func (app *App) nativeOpenLicenses(licenseDocuments) error {
+	C.actOpenLicenses()
+	return nil
+}
+
+// nativeCloseLicenses closes the licenses reader when it is the window in front.
+func (app *App) nativeCloseLicenses() bool { return C.actCloseLicensesIfKey() != 0 }

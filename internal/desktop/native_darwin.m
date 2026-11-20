@@ -2,6 +2,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #include "native_darwin.h"
 
@@ -13,8 +14,35 @@ extern void actDockMarkAllRead(void);
 extern void actTransparencyChanged(int reduced);
 extern void actDidWake(void);
 
+/* Text fields take typed text as is, as in Chromium: no autocorrection or smart substitutions.
+   Set in the volatile argument domain before WebKit first reads it, so nothing is persisted. */
+__attribute__((constructor)) static void disableTextSubstitutions(void) {
+  @autoreleasepool {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary *arguments = [[[defaults volatileDomainForName:NSArgumentDomain] mutableCopy] autorelease];
+    for (NSString *key in @[@"WebAutomaticSpellingCorrectionEnabled", @"WebAutomaticQuoteSubstitutionEnabled",
+                            @"WebAutomaticDashSubstitutionEnabled", @"WebAutomaticTextReplacementEnabled"]) {
+      arguments[key] = @NO;
+    }
+    [defaults setVolatileDomain:arguments forName:NSArgumentDomain];
+  }
+}
+
+/* Paints at the display's own rate, as Chromium does, rather than WebKit's default cap near 60 frames a second. */
+static void unlockFrameRate(WKWebView *webView) {
+  SEL features = NSSelectorFromString(@"_features");
+  SEL setEnabled = NSSelectorFromString(@"_setEnabled:forFeature:");
+  if (!webView || ![WKPreferences respondsToSelector:features] || ![webView.configuration.preferences respondsToSelector:setEnabled]) return;
+  for (id feature in ((NSArray *(*)(id, SEL))objc_msgSend)([WKPreferences class], features)) {
+    if ([[feature valueForKey:@"key"] isEqualToString:@"PreferPageRenderingUpdatesNear60FPSEnabled"]) {
+      ((void (*)(id, SEL, BOOL, id))objc_msgSend)(webView.configuration.preferences, setEnabled, NO, feature);
+    }
+  }
+}
+
 static BOOL dockHasUnread = NO;
 static void placeTrafficLights(NSWindow *window);
+static NSWindow *keyOrMainWindow(void);
 static NSString *const VisualFramePath = @"/__app/visual-frame";
 
 static NSWindow *mainWindow(void) {
@@ -24,8 +52,11 @@ static NSWindow *mainWindow(void) {
   return nil;
 }
 
+/* The page's web view. An attached Web Inspector is a web view in the same window, so it is passed over. */
 static WKWebView *findWebView(NSView *view) {
-  if ([view isKindOfClass:[WKWebView class]]) return (WKWebView *)view;
+  if ([view isKindOfClass:[WKWebView class]]) {
+    return [NSStringFromClass([view class]) containsString:@"Inspector"] ? nil : (WKWebView *)view;
+  }
   for (NSView *child in [view subviews]) {
     WKWebView *found = findWebView(child);
     if (found) return found;
@@ -125,15 +156,15 @@ void actReveal(void) {
 }
 
 void actToggleFullScreen(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{ [mainWindow() toggleFullScreen:nil]; });
+  dispatch_async(dispatch_get_main_queue(), ^{ [keyOrMainWindow() toggleFullScreen:nil]; });
 }
 
 void actMinimize(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{ [mainWindow() performMiniaturize:nil]; });
+  dispatch_async(dispatch_get_main_queue(), ^{ [keyOrMainWindow() performMiniaturize:nil]; });
 }
 
 void actZoomWindow(void) {
-  dispatch_async(dispatch_get_main_queue(), ^{ [mainWindow() performZoom:nil]; });
+  dispatch_async(dispatch_get_main_queue(), ^{ [keyOrMainWindow() performZoom:nil]; });
 }
 
 void actBringAllToFront(void) {
@@ -290,8 +321,29 @@ static BOOL shouldClose(id self, SEL _cmd, NSWindow *sender) {
   return ((BOOL(*)(id, SEL, NSWindow *))originalShouldClose)(self, _cmd, sender);
 }
 
+/* Software that types (a driver, a text expander) can put several characters in one key event.
+   WebKit gives a page only the first as the event's key, so a page that takes keys itself, as the
+   terminal does, drops the rest; each character goes in a key event of its own, as Chromium has it. */
+static id typedTextMonitor = nil;
+
+static NSEvent *splitTypedText(NSEvent *event) {
+  NSString *characters = event.characters;
+  NSWindow *window = event.window;
+  NSEventModifierFlags held = NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption;
+  if (!window || characters.length < 2 || (event.modifierFlags & held) != 0) return event;
+  if ([characters rangeOfComposedCharacterSequenceAtIndex:0].length == characters.length) return event;
+  [characters enumerateSubstringsInRange:NSMakeRange(0, characters.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *piece, NSRange range, NSRange enclosing, BOOL *stop) {
+    NSEvent *key = [NSEvent keyEventWithType:NSEventTypeKeyDown location:event.locationInWindow modifierFlags:event.modifierFlags timestamp:event.timestamp windowNumber:event.windowNumber context:nil characters:piece charactersIgnoringModifiers:piece isARepeat:NO keyCode:event.keyCode];
+    if (key) [window sendEvent:key];
+  }];
+  return nil;
+}
+
 void actInstallWindowHooks(int material) {
   dispatch_async(dispatch_get_main_queue(), ^{
+    if (!typedTextMonitor) {
+      typedTextMonitor = [[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) { return splitTypedText(event); }] retain];
+    }
     NSWindow *window = mainWindow();
     if (!window) return;
     /* A window over a material is created clear, so the material samples what lies behind it. */
@@ -308,6 +360,7 @@ void actInstallWindowHooks(int material) {
     class_addMethod(delegateClass, @selector(actMarkAllRead:), (IMP)markAllRead, "v@:@");
 
     WKWebView *webView = findWebView([window contentView]);
+    unlockFrameRate(webView);
     id navigationDelegate = webView.navigationDelegate;
     if (navigationDelegate) {
       class_addMethod([navigationDelegate class], @selector(webView:decidePolicyForNavigationAction:decisionHandler:), (IMP)decideNavigation, "v@:@@@?");
@@ -361,6 +414,18 @@ char *actFontFamilies(void) {
   return result;
 }
 
+/* Returns the paths of the files on the general pasteboard, one per line; the caller frees the result. */
+char *actPasteboardFiles(void) {
+  __block char *result = NULL;
+  runOnMain(^{
+    NSArray<NSURL *> *urls = [[NSPasteboard generalPasteboard] readObjectsForClasses:@[[NSURL class]] options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (NSURL *url in urls) if (url.path) [paths addObject:url.path];
+    result = strdup([[paths componentsJoinedByString:@"\n"] UTF8String]);
+  });
+  return result;
+}
+
 /* Where AppKit has Liquid Glass, the page is laid out as one glass sheet. Electron's window shows
    its vibrancy over the glass it attaches, so the sidebar material is what draws behind the page. */
 int actGlassAvailable(void) { return NSClassFromString(@"NSGlassEffectView") != nil; }
@@ -402,4 +467,124 @@ void actWatchTransparency(void) {
   [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
     actDidWake();
   }];
+}
+
+/* The open-source licenses reader: its own window, beside the app's, showing only the documents the
+   app ships through a scheme the Go side answers. It runs no script and opens nothing else. */
+extern ActLicenseAnswer actLicenseResponse(char *url);
+
+static NSString *const LicenseRoot = @"aicodingtool-licenses://notices/";
+
+@interface ActLicenseViewer : NSObject <WKURLSchemeHandler, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate>
+@property(nonatomic, retain) NSWindow *window;
+@property(nonatomic) BOOL shown;
+@end
+
+static ActLicenseViewer *licenseViewer = nil;
+
+@implementation ActLicenseViewer
+- (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)task {
+  ActLicenseAnswer answer = actLicenseResponse((char *)task.request.URL.absoluteString.UTF8String);
+  NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithObject:[NSString stringWithUTF8String:answer.contentType] forKey:@"Content-Type"];
+  if (answer.csp) headers[@"Content-Security-Policy"] = [NSString stringWithUTF8String:answer.csp];
+  NSHTTPURLResponse *response = [[[NSHTTPURLResponse alloc] initWithURL:task.request.URL statusCode:answer.status HTTPVersion:@"HTTP/1.1" headerFields:headers] autorelease];
+  [task didReceiveResponse:response];
+  [task didReceiveData:[NSData dataWithBytesNoCopy:answer.body length:answer.length freeWhenDone:YES]];
+  [task didFinish];
+  free(answer.contentType);
+  free(answer.csp);
+}
+
+- (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)task {}
+
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decision {
+  decision([action.request.URL.absoluteString hasPrefix:LicenseRoot] ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
+}
+
+- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)action windowFeatures:(WKWindowFeatures *)features {
+  return nil;
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+  if (self.shown) return;
+  self.shown = YES;
+  NSWindow *parent = mainWindow();
+  if (parent && parent.isVisible) [parent addChildWindow:self.window ordered:NSWindowAbove];
+  [self.window makeKeyAndOrderFront:nil];
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+  if (!self.shown) [self.window close];
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+  NSWindow *window = self.window;
+  [window.parentWindow removeChildWindow:window];
+  window.delegate = nil;
+  if (licenseViewer == self) licenseViewer = nil;
+  /* The web view holds this reader as its scheme handler, so it goes once the view has. */
+  dispatch_async(dispatch_get_main_queue(), ^{
+    window.contentView = nil;
+    self.window = nil;
+    [self release];
+  });
+}
+
+- (void)dealloc {
+  [_window release];
+  [super dealloc];
+}
+@end
+
+void actOpenLicenses(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (licenseViewer) {
+      if (!licenseViewer.shown) return;
+      NSWindow *window = licenseViewer.window;
+      if (window.isMiniaturized) [window deminiaturize:nil];
+      [window makeKeyAndOrderFront:nil];
+      return;
+    }
+    ActLicenseViewer *viewer = [ActLicenseViewer new];
+    NSWindow *window = [[[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1000, 760)
+                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:NO] autorelease];
+    window.releasedWhenClosed = NO;
+    window.title = @"Open Source Licenses";
+    [window setFrame:NSMakeRect(0, 0, 1000, 760) display:NO];
+    window.minSize = NSMakeSize(650, 400);
+    [window center];
+    viewer.window = window;
+    window.delegate = viewer;
+
+    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration new] autorelease];
+    configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+    [configuration setURLSchemeHandler:viewer forURLScheme:@"aicodingtool-licenses"];
+    if (@available(macOS 11.0, *)) configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
+    WKWebView *view = [[[WKWebView alloc] initWithFrame:window.contentView.bounds configuration:configuration] autorelease];
+    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    view.navigationDelegate = viewer;
+    view.UIDelegate = viewer;
+    window.contentView = view;
+    licenseViewer = viewer;
+    [view loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:LicenseRoot]]];
+  });
+}
+
+/* Closes the licenses reader when it is the window in front; the app's own window keeps its close. */
+int actCloseLicensesIfKey(void) {
+  __block int closed = 0;
+  runOnMain(^{
+    if (licenseViewer && licenseViewer.window.isKeyWindow) {
+      [licenseViewer.window performClose:nil];
+      closed = 1;
+    }
+  });
+  return closed;
+}
+
+static NSWindow *keyOrMainWindow(void) {
+  if (licenseViewer && licenseViewer.window.isKeyWindow) return licenseViewer.window;
+  return mainWindow();
 }

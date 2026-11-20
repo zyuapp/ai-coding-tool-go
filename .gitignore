@@ -6,3 +6,5 @@
 *.test
 /tmp/
 .DS_Store
+/build/cua-driver/
+/build/package/

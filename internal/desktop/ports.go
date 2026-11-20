@@ -3,6 +3,8 @@ package desktop
 import (
 	"context"
 	"encoding/json/jsontext"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 // Result is what one window call settles with: a JSON value, or the error its promise rejects with.
@@ -66,13 +68,5 @@ type ImageReads interface {
 	// Attachment reads a kept attachment by its file name, as the thread names it.
 	Attachment(ctx context.Context, name, thread string) ([]byte, error)
 	// MessageImage reads an image a reply linked, or its thumbnail.
-	MessageImage(ctx context.Context, query MessageImageQuery, thread string) (bytes []byte, contentType string, err error)
-}
-
-// MessageImageQuery mirrors the `{ kind: "message-image" }` computer query.
-type MessageImageQuery struct {
-	Path      string `json:"path"`
-	Root      string `json:"root"`
-	Message   string `json:"message"`
-	Thumbnail bool   `json:"thumbnail"`
+	MessageImage(ctx context.Context, query contracts.ComputerQueryMessageImage, thread string) (bytes []byte, contentType string, err error)
 }

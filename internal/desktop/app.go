@@ -21,6 +21,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 	"github.com/zyuapp/ai-coding-tool-go/internal/updates"
 )
 
@@ -68,7 +69,7 @@ type App struct {
 
 	mu        sync.Mutex
 	ctx       context.Context
-	theme     WindowTheme
+	theme     contracts.WindowTheme
 	active    *bool
 	keyboard  keyboardState
 	closed    bool
@@ -78,6 +79,11 @@ type App struct {
 	unread    bool
 
 	updateItem *menu.MenuItem
+
+	// pushes holds scripts for the window in the order they were sent; pushing wakes their runner.
+	pushMu  sync.Mutex
+	pushes  []string
+	pushing chan struct{}
 
 	themes     themeWriter
 	placements placementWriter
@@ -98,7 +104,8 @@ func New(options Options) *App {
 	if options.AppName == "" {
 		options.AppName = "AI Coding Tool"
 	}
-	app := &App{options: options, material: windowMaterial(), started: make(chan struct{}), done: make(chan struct{})}
+	app := &App{options: options, material: windowMaterial(), started: make(chan struct{}), done: make(chan struct{}), pushing: make(chan struct{}, 1)}
+	go app.runPushes()
 	app.bridge = newBridge(app)
 	app.theme = LoadWindowTheme(filepath.Join(options.ProfileDir, ThemeFile))
 	app.keyboard = keyboardState{Overrides: jsontext.Value("{}")}
@@ -169,7 +176,9 @@ func (app *App) Run() error {
 		Bind:               []any{app.bridge},
 		DragAndDrop:        &options.DragAndDrop{EnableFileDrop: true},
 		Mac: &mac.Options{
-			TitleBar:             mac.TitleBarHiddenInset(),
+			// Electron's hiddenInset: a clear title bar over the page and no toolbar, which would add its
+			// height to the window's minimum.
+			TitleBar:             &mac.TitleBar{TitlebarAppearsTransparent: true, HideTitle: true, FullSizeContent: true},
 			WebviewIsTransparent: translucent,
 			WindowIsTranslucent:  translucent,
 			Preferences: &mac.Preferences{
@@ -261,7 +270,31 @@ func (app *App) Send(channel string, payload jsontext.Value) {
 		return
 	}
 	name, _ := json.Marshal(channel)
-	runtime.WindowExecJS(ctx, "window.__aicodingtoolPush&&window.__aicodingtoolPush("+string(name)+","+string(payload)+");")
+	app.pushMu.Lock()
+	app.pushes = append(app.pushes, "window.__aicodingtoolPush&&window.__aicodingtoolPush("+string(name)+","+string(payload)+");")
+	app.pushMu.Unlock()
+	select {
+	case app.pushing <- struct{}{}:
+	default:
+	}
+}
+
+// runPushes runs the window's scripts off the main thread, which Send may be called on from a native
+// callback. Wails hands a script to the main queue in a block that releases its text once more than it
+// retains it, and the main thread's autorelease pool would then free it a second time.
+func (app *App) runPushes() {
+	for range app.pushing {
+		app.pushMu.Lock()
+		scripts := app.pushes
+		app.pushes = nil
+		app.pushMu.Unlock()
+		app.mu.Lock()
+		ctx := app.ctx
+		app.mu.Unlock()
+		for _, script := range scripts {
+			runtime.WindowExecJS(ctx, script)
+		}
+	}
 }
 
 // SendValue encodes payload and pushes it.
@@ -472,25 +505,25 @@ func (app *App) shutdown() {
 }
 
 // setWindowTheme: the frame follows the window's theme, and remembers it for the next launch's first paint.
-func (app *App) setWindowTheme(theme WindowTheme) {
+func (app *App) setWindowTheme(theme contracts.WindowTheme) {
 	app.mu.Lock()
-	same := theme.same(app.theme)
+	same := sameTheme(theme, app.theme)
 	app.mu.Unlock()
 	if same {
 		return
 	}
 	app.applyWindowTheme(theme)
-	go app.themes.remember(filepath.Join(app.options.ProfileDir, ThemeFile), theme)
+	app.themes.remember(filepath.Join(app.options.ProfileDir, ThemeFile), theme)
 }
 
-func (app *App) applyWindowTheme(theme WindowTheme) {
+func (app *App) applyWindowTheme(theme contracts.WindowTheme) {
 	app.mu.Lock()
 	app.theme = theme
 	app.mu.Unlock()
 	switch {
-	case theme.follows():
+	case themeFollows(theme):
 		app.nativeSetAppearance(0)
-	case theme.Variant == "light":
+	case theme.Variant == contracts.WindowThemeVariantLight:
 		app.nativeSetAppearance(2)
 	default:
 		app.nativeSetAppearance(1)

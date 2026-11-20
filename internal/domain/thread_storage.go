@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json/jsontext"
 	"errors"
 	"maps"
 	"slices"
@@ -999,18 +1000,51 @@ var shownAsSent = jsonx.SetOf("threadModel", "proposals")
 func ParseStoredConversationMessages(values []any) ([]*ConversationMessage, error) {
 	messages := make([]*ConversationMessage, len(values))
 	for index, value := range values {
-		renamed, _ := renamedMessageFields(value)
-		var message *ConversationMessage
-		ok := isConversationMessage(renamed)
-		if ok {
-			message, ok = decodeRecord[ConversationMessage](renamed)
-		}
+		message, ok := parseStoredMessage(value, nil)
 		if !ok {
-			return nil, errors.New("Stored message " + strconv.Itoa(index+1) + " is unreadable.")
+			return nil, storedMessageUnreadable(index)
 		}
 		messages[index] = message
 	}
 	return messages, nil
+}
+
+// ParseStoredConversationRows is ParseStoredConversationMessages over the stored JSON rows. A message
+// stored in today's shape is decoded from its row directly rather than encoded again first.
+func ParseStoredConversationRows(rows []jsontext.Value) ([]*ConversationMessage, error) {
+	messages := make([]*ConversationMessage, len(rows))
+	for index, row := range rows {
+		var value any
+		if err := jsonx.Unmarshal(row, &value); err != nil {
+			return nil, err
+		}
+		message, ok := parseStoredMessage(value, row)
+		if !ok {
+			return nil, storedMessageUnreadable(index)
+		}
+		messages[index] = message
+	}
+	return messages, nil
+}
+
+func storedMessageUnreadable(index int) error {
+	return errors.New("Stored message " + strconv.Itoa(index+1) + " is unreadable.")
+}
+
+// parseStoredMessage reads value, decoding row, its encoding, when no field needed renaming.
+func parseStoredMessage(value any, row jsontext.Value) (*ConversationMessage, bool) {
+	renamed, changed := renamedMessageFields(value)
+	if !isConversationMessage(renamed) {
+		return nil, false
+	}
+	if changed || row == nil {
+		return decodeRecord[ConversationMessage](renamed)
+	}
+	var message ConversationMessage
+	if err := jsonx.Unmarshal(row, &message); err != nil {
+		return nil, false
+	}
+	return &message, true
 }
 
 func recordedEngine(value any) any {

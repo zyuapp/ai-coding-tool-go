@@ -1,11 +1,12 @@
 import type { DesktopPlatform, ShortcutInvocation, WindowDesktopAPI, WindowDesktopCall, WindowMaterial } from "../contracts/ipc";
 import type { WorkspaceBridge } from "../application/workspace-runtime";
 import { keystrokeOf, resolveShortcuts, shortcutFor, formatShortcut, type ShortcutBinding, type ShortcutOverrides } from "../domain/shortcuts";
+import "./web-view.css";
 
 /**
  * Builds `window.desktop` and `window.workspace` on the Wails runtime, in the shapes the Electron
  * preload gave them, and supplies what a system web view lacks: the app's own schemes, the paths of
- * dropped files, the keyboard main matched before the page, and links that leave the app.
+ * dropped and pasted files, the keyboard main matched before the page, and links that leave the app.
  */
 
 type Ticket = { page: string; seq: number; absent: number[] };
@@ -17,6 +18,7 @@ type GoBridge = {
   Loaded(): Promise<void>;
   TitlebarDoubleClick(): Promise<void>;
   LocalFonts(): Promise<string[]>;
+  PasteboardFiles(): Promise<string[]>;
 };
 type DesktopIdentity = { platform?: DesktopPlatform; windowMaterial?: WindowMaterial; reducedTransparency?: boolean };
 
@@ -151,6 +153,28 @@ window.addEventListener("drop", (event) => {
     const transfer = new DataTransfer();
     for (const file of files) transfer.items.add(file);
     const again = new DragEvent("drop", { ...init, dataTransfer: transfer });
+    redelivered.add(again);
+    target.dispatchEvent(again);
+  });
+}, true);
+
+/** A pasted file has no path either; the clipboard's file paths are read and the paste delivered again with them. */
+window.addEventListener("paste", (event) => {
+  if (redelivered.has(event) || !event.clipboardData) return;
+  const files = Array.from(event.clipboardData.files);
+  if (files.length === 0) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const target = event.target ?? window;
+  void go().PasteboardFiles().catch(() => []).then((paths) => {
+    const remaining = [...paths];
+    for (const file of files) {
+      const index = remaining.findIndex((path) => baseName(path) === file.name);
+      if (index >= 0) droppedPaths.set(file, remaining.splice(index, 1)[0]);
+    }
+    const transfer = new DataTransfer();
+    for (const file of files) transfer.items.add(file);
+    const again = new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: transfer });
     redelivered.add(again);
     target.dispatchEvent(again);
   });

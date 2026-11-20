@@ -33,12 +33,13 @@ const (
 	missingDriver   = "The bundled CUA Driver executable is missing."
 )
 
-// DriverPath is where the bundled driver sits: beside a packaged app's resources, under vendor/ in a source checkout.
+// DriverPath is where the bundled driver sits: beside a packaged app's resources, under build/cua-driver in a source
+// checkout (scripts/prepare-cua-driver.sh).
 func DriverPath(packaged bool, resourcesPath, appPath string) string {
 	if packaged {
 		return filepath.Join(resourcesPath, "cua-driver")
 	}
-	return filepath.Join(appPath, "vendor", "cua-driver", "cua-driver")
+	return filepath.Join(appPath, "build", "cua-driver", "cua-driver")
 }
 
 // Host owns the permission checks and one private driver daemon that every run's MCP proxy talks to.

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -24,22 +22,6 @@ const titleTimeout = 20 * time.Second
 
 // How long the server the app reads models and commands from stays up after its last question.
 const servicesIdle = 60 * time.Second
-
-// The plugin name both engines qualify the app's skills with.
-const appPluginName = "aicodingtool"
-
-// The plugin's skills folder, or "" when the app has no plugin.
-func skillsRoot(pluginRoot string) string {
-	if pluginRoot == "" {
-		return ""
-	}
-	return filepath.Join(pluginRoot, "skills")
-}
-
-// `aicodingtool:review-thread` and `review-thread` are the same app skill.
-func unqualifiedSkillName(name string) string {
-	return strings.TrimPrefix(name, appPluginName+":")
-}
 
 type serverStart struct {
 	done   chan struct{}
@@ -74,7 +56,7 @@ func NewServices(connect Connect, pluginRoot string) *Services {
 func (s *Services) start() *serverStart {
 	starting := &serverStart{done: make(chan struct{})}
 	options := ServerOptions{Cwd: homeDir()}
-	if skills := skillsRoot(s.pluginRoot); skills != "" {
+	if skills := agent.AppSkillsRoot(s.pluginRoot); skills != "" {
 		options.Config = map[string]any{"skills": []string{skills}}
 	}
 	go func() {
@@ -222,7 +204,7 @@ func (s *Services) Commands(ctx context.Context, workspaceRoot string) ([]*contr
 			listed = append(listed, &contracts.AvailableCommand{Name: command.Name, Description: orEmpty(command.Description)})
 		}
 		for _, skill := range skills {
-			listed = append(listed, &contracts.AvailableCommand{Name: unqualifiedSkillName(skill.ID), Description: orEmpty(skill.Description)})
+			listed = append(listed, &contracts.AvailableCommand{Name: agent.UnqualifiedSkillName(skill.ID), Description: orEmpty(skill.Description)})
 		}
 		// Each name once, where it first appears, as the last listing of it says.
 		at := map[string]int{}

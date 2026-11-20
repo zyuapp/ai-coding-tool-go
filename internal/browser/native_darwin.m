@@ -141,6 +141,7 @@ static NSString *failureMessage(NSError *error) {
 }
 
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
+  [webView setValue:@YES forKey:@"drawsBackground"];
   if (!self.closed) actBrowserCommitted(self.handle);
 }
 
@@ -428,6 +429,8 @@ char *actBrowserOpen(uint64_t handle, double width, double height) {
     view.allowsBackForwardNavigationGestures = YES;
     if (@available(macOS 13.3, *)) view.inspectable = YES;
     view.hidden = YES;
+    /* A tab that has loaded nothing draws nothing, so the panel's empty state shows through it. */
+    [view setValue:@NO forKey:@"drawsBackground"];
     ACTBrowserPage *page = [ACTBrowserPage new];
     page.handle = handle;
     page.view = view;

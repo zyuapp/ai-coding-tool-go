@@ -665,7 +665,7 @@ func (s *Session) open(seed *agent.ProviderRunInput) error {
 		command := append([]string{computerUse.MCP.Command}, computerUse.MCP.Args...)
 		config.MCP[ComputerUseServerName] = mcpServer{Type: "local", Command: command, Environment: computerUse.MCP.Env}
 	}
-	if skills := skillsRoot(s.pluginRoot); skills != "" {
+	if skills := agent.AppSkillsRoot(s.pluginRoot); skills != "" {
 		config.Skills = []string{skills}
 	}
 	c, err := s.connect(ctx, ServerOptions{Cwd: seed.WorkspaceRoot, Config: config, OnSpawn: s.hooks.Resources.RegisterProcess})

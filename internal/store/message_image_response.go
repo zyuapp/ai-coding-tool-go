@@ -3,6 +3,8 @@ package store
 import (
 	"net/http"
 	"net/url"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 // MessageImageResponse answers a message-image:// request, retaining the holder's original once
@@ -18,7 +20,7 @@ func MessageImageResponse(source string, reads ImageReads) ImageResponse {
 		}
 		return ""
 	}
-	query := MessageImageQuery{Path: param("path"), Root: param("root"), Message: param("message"), Thumbnail: param("thumbnail") == "1"}
+	query := contracts.ComputerQueryMessageImage{Path: param("path"), Root: param("root"), Message: param("message"), Thumbnail: new(param("thumbnail") == "1")}
 	image, err := reads.ReadMessageImage(query, queryParam(parsed, "taskId"))
 	if err != nil {
 		return textResponse(http.StatusNotFound, "Image unavailable")

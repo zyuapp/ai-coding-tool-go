@@ -5,6 +5,7 @@ import (
 
 	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
+	"github.com/zyuapp/ai-coding-tool-go/internal/jsonx"
 )
 
 // BrowserInputs are the input types ReduceBrowser takes.
@@ -97,8 +98,7 @@ func ReduceBrowser(state *WorkspaceState, input WorkspaceInput) SliceTransition 
 		return SliceTransition{Effects: []WorkspaceEffect{WorkspaceEffectBrowserAct{TabID: target.ID, Action: input.Action, TaskID: input.TaskID}}}
 
 	case contracts.BrowserCommandBrowserClearData:
-		// Capacity 1: empty slices of capacity 0 share one address, so jsonx.Same would see no change.
-		return SliceTransition{Patch: func(next *WorkspaceState) { next.BrowserOrigins = make([]string, 0, 1) }, Effects: []WorkspaceEffect{WorkspaceEffectBrowserClearData{}}, Persists: true}
+		return SliceTransition{Patch: func(next *WorkspaceState) { next.BrowserOrigins = jsonx.Fresh[string](0) }, Effects: []WorkspaceEffect{WorkspaceEffectBrowserClearData{}}, Persists: true}
 
 	case BrowserEvent:
 		page := input.Page

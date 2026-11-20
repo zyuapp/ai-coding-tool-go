@@ -69,7 +69,7 @@ static void postNotice(const char *identifier, const char *title, const char *bo
 			showNotice(center, nsIdentifier, nsTitle, nsBody);
 			return;
 		}
-		[center requestAuthorizationWithOptions:UNAuthorizationOptionAlert completionHandler:^(BOOL granted, NSError *error) {
+		[center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionBadge | UNAuthorizationOptionSound) completionHandler:^(BOOL granted, NSError *error) {
 			noticeAsked = YES;
 			noticeAuthorized = granted;
 			if (granted) showNotice(center, nsIdentifier, nsTitle, nsBody);

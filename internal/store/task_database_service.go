@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
+	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
 )
 
 // ErrClosing answers a request made once the store has begun to close.
@@ -146,16 +149,18 @@ func (s *TaskDatabaseService) push(next request) {
 	}
 }
 
-func (s *TaskDatabaseService) Load() *Pending[*LoadedTaskStore] {
-	return enqueue(s, func(database *TaskDatabase) (*LoadedTaskStore, error) { return database.Load(false) })
+func (s *TaskDatabaseService) Load() *Pending[*contracts.LoadedTaskStore] {
+	return enqueue(s, func(database *TaskDatabase) (*contracts.LoadedTaskStore, error) { return database.Load(false) })
 }
 
-func (s *TaskDatabaseService) LoadSummaries() *Pending[*LoadedTaskStore] {
-	return enqueue(s, func(database *TaskDatabase) (*LoadedTaskStore, error) { return database.Load(true) })
+func (s *TaskDatabaseService) LoadSummaries() *Pending[*contracts.LoadedTaskStore] {
+	return enqueue(s, func(database *TaskDatabase) (*contracts.LoadedTaskStore, error) { return database.Load(true) })
 }
 
-func (s *TaskDatabaseService) LoadThreadMessages(taskID string) *Pending[[]jsontext.Value] {
-	return enqueue(s, func(database *TaskDatabase) ([]jsontext.Value, error) { return database.LoadThreadMessages(taskID) })
+func (s *TaskDatabaseService) LoadThreadMessages(taskID string) *Pending[[]*domain.ConversationMessage] {
+	return enqueue(s, func(database *TaskDatabase) ([]*domain.ConversationMessage, error) {
+		return database.LoadThreadMessages(taskID)
+	})
 }
 
 func (s *TaskDatabaseService) SearchThreadMessages(search string, taskIDs []string) *Pending[[]string] {
@@ -166,15 +171,15 @@ func (s *TaskDatabaseService) AttachmentPaths() *Pending[[]string] {
 	return enqueue(s, func(database *TaskDatabase) ([]string, error) { return database.AttachmentPaths() })
 }
 
-func (s *TaskDatabaseService) SubagentActivity(taskID, subagentID string) *Pending[[]jsontext.Value] {
-	return enqueue(s, func(database *TaskDatabase) ([]jsontext.Value, error) {
+func (s *TaskDatabaseService) SubagentActivity(taskID, subagentID string) *Pending[[]*domain.SubagentActivity] {
+	return enqueue(s, func(database *TaskDatabase) ([]*domain.SubagentActivity, error) {
 		return database.SubagentActivity(taskID, subagentID)
 	})
 }
 
-// Persist writes a TaskStoreDelta, or a value that encodes to one. A typed value is encoded on the
-// store's goroutine, so it must not change after it is handed over.
-func (s *TaskDatabaseService) Persist(delta any) *Pending[struct{}] {
+// Persist writes a delta. It is encoded on the store's goroutine, so it must not change after it is
+// handed over.
+func (s *TaskDatabaseService) Persist(delta contracts.TaskStoreDelta) *Pending[struct{}] {
 	return enqueue(s, func(database *TaskDatabase) (struct{}, error) { return struct{}{}, database.Persist(delta) })
 }
 

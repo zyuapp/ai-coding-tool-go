@@ -1,0 +1,12 @@
+/**
+ * Chromium's backdrop filters sample only the page. WebKit's also sample the window behind a clear
+ * page, which turns every veil and glass pane into a blur of the whole window. A backdrop root
+ * under the document keeps them to the page.
+ */
+body { will-change: opacity; }
+/**
+ * WebKit leaves a settings page centred for the width it had before its scrollbar appeared, so a
+ * page that grows sits off centre from the parts drawn after. The page keeps its scrollbar's room
+ * from the start instead.
+ */
+:root .settings-main { overflow-y: scroll; }

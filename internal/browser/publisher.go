@@ -12,7 +12,6 @@ import (
 // reports them never waits on a listener.
 type publisher struct {
 	mu     sync.Mutex
-	wake   *sync.Cond
 	queue  []func()
 	next   int
 	pages  map[int]func(contracts.BrowserPageEvent)
@@ -22,7 +21,6 @@ type publisher struct {
 
 func newPublisher() *publisher {
 	p := &publisher{pages: map[int]func(contracts.BrowserPageEvent){}, finds: map[int]func(contracts.BrowserFindEvent){}}
-	p.wake = sync.NewCond(&p.mu)
 	return p
 }
 
@@ -34,15 +32,11 @@ func (p *publisher) enqueue(deliver func()) {
 		p.runner = true
 		go p.run()
 	}
-	p.wake.Signal()
 }
 
 func (p *publisher) run() {
 	p.mu.Lock()
-	for {
-		for len(p.queue) == 0 {
-			p.wake.Wait()
-		}
+	for len(p.queue) > 0 {
 		deliver := p.queue[0]
 		p.queue[0] = nil
 		p.queue = p.queue[1:]
@@ -50,6 +44,9 @@ func (p *publisher) run() {
 		deliver()
 		p.mu.Lock()
 	}
+	p.queue = nil
+	p.runner = false
+	p.mu.Unlock()
 }
 
 func (p *publisher) page(event contracts.BrowserPageEvent) {

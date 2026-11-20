@@ -3,18 +3,14 @@ package codex
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
+	"github.com/zyuapp/ai-coding-tool-go/internal/engines/agent"
 	"github.com/zyuapp/ai-coding-tool-go/internal/engines/codex/protocol"
 )
-
-// The plugin name both engines qualify the app's skills with.
-const appPluginName = "aicodingtool"
 
 var appPlugin struct {
 	sync.RWMutex
@@ -32,15 +28,8 @@ func SetAppPluginRoot(directory string) {
 func appSkillsRoot() (string, bool) {
 	appPlugin.RLock()
 	defer appPlugin.RUnlock()
-	if appPlugin.root == "" {
-		return "", false
-	}
-	return filepath.Join(appPlugin.root, "skills"), true
-}
-
-// `aicodingtool:review-thread` and `review-thread` are the same app skill.
-func UnqualifiedSkillName(name string) string {
-	return strings.TrimPrefix(name, appPluginName+":")
+	root := agent.AppSkillsRoot(appPlugin.root)
+	return root, root != ""
 }
 
 // Codex qualifies the app's skills as `aicodingtool:skill`; the app offers and matches them by the short name.
@@ -139,7 +128,7 @@ func discover(ctx context.Context, cwd string, connect CodexConnect, timeout tim
 		}
 		commands := make([]*contracts.AvailableCommand, 0, len(skills))
 		for _, skill := range skills {
-			commands = append(commands, &contracts.AvailableCommand{Name: UnqualifiedSkillName(skill.Name), Description: skill.Description})
+			commands = append(commands, &contracts.AvailableCommand{Name: agent.UnqualifiedSkillName(skill.Name), Description: skill.Description})
 		}
 		return commands, nil
 	})
@@ -199,7 +188,7 @@ func (skills *CodexSkills) Input(prompt string) []protocol.UserInput {
 	available := map[string]protocol.SkillMetadata{}
 	for _, skill := range skills.skills {
 		available[skill.Name] = skill
-		available[UnqualifiedSkillName(skill.Name)] = skill
+		available[agent.UnqualifiedSkillName(skill.Name)] = skill
 	}
 	skills.mu.Unlock()
 	requested := []protocol.UserInput{}

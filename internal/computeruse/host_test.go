@@ -183,16 +183,17 @@ func TestTheBridgeRunsInputsInOrderAndStopsAtTheFirstRefusal(t *testing.T) {
 		contracts.ComputerServerMessageResultResultTrue{Revision: 5},
 	}}
 	bridge := CreateComputerBridge(BridgeHost{Publisher: publisher, Name: func() string { return "desk" }})
-	if empty := bridge.Input(context.Background(), nil); empty != (contracts.ComputerServerMessageResultResultTrue{Revision: 3}) {
+	if empty, _ := bridge.Input(context.Background(), nil); empty != (contracts.ComputerServerMessageResultResultTrue{Revision: 3}) {
 		t.Fatalf("%+v", empty)
 	}
-	got := bridge.Input(context.Background(), []application.WorkspaceInput{nil, nil}).(contracts.ComputerServerMessageResultResultTrue)
+	answer, _ := bridge.Input(context.Background(), []application.WorkspaceInput{nil, nil})
+	got := answer.(contracts.ComputerServerMessageResultResultTrue)
 	if got.Revision != 5 || got.TaskID == nil || *got.TaskID != task {
 		t.Fatalf("%+v", got)
 	}
 	refused := contracts.ComputerServerMessageResultResultFalse{Message: "no", Revision: 6}
 	publisher.answers = []application.WorkspaceResponseResult{refused, contracts.ComputerServerMessageResultResultTrue{Revision: 7}}
-	if answer := bridge.Input(context.Background(), []application.WorkspaceInput{nil, nil}); answer != refused || len(publisher.answers) != 1 {
+	if answer, _ := bridge.Input(context.Background(), []application.WorkspaceInput{nil, nil}); answer != refused || len(publisher.answers) != 1 {
 		t.Fatalf("%+v", answer)
 	}
 }

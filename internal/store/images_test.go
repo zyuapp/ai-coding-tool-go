@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 func pngOf(t *testing.T, width, height int) []byte {
@@ -57,8 +59,8 @@ func (r localReads) ReadAttachment(name string, _ *string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(data)
 }
 
-func (r localReads) ReadMessageImage(query MessageImageQuery, _ *string) (MessageImage, error) {
-	return r.images.ReadMessageImage(query.Path, query.Root, query.Message, query.Thumbnail)
+func (r localReads) ReadMessageImage(query contracts.ComputerQueryMessageImage, _ *string) (MessageImage, error) {
+	return r.images.ReadMessageImage(query.Path, query.Root, query.Message, query.Thumbnail != nil && *query.Thumbnail)
 }
 
 func TestReferencedImagesSurviveDeletionAndARestart(t *testing.T) {

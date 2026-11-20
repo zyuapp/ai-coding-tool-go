@@ -154,21 +154,14 @@ func (r imageReads) ReadAttachment(name string, thread *string) ([]byte, error) 
 	return r.c.services.Reads.Attachment(context.Background(), name, thread)
 }
 
-func (r imageReads) ReadMessageImage(query store.MessageImageQuery, thread *string) (store.MessageImage, error) {
-	answer, err := r.c.services.Reads.MessageImage(context.Background(), query.Path, query.Root, query.Message, query.Thumbnail, thread)
+func (r imageReads) ReadMessageImage(query contracts.ComputerQueryMessageImage, thread *string) (store.MessageImage, error) {
+	answer, err := r.c.services.Reads.MessageImage(context.Background(), query.Path, query.Root, query.Message, query.Thumbnail != nil && *query.Thumbnail, thread)
 	return store.MessageImage{Bytes: answer.Bytes, ContentType: answer.ContentType}, err
 }
 
-// OpenSourceLicenses shows the notices the app ships, in the platform's own viewer.
+// OpenSourceLicenses shows the notices the app ships in the app's own reader.
 func (w *windowDesktop) OpenSourceLicenses(context.Context) error {
-	root := filepath.Join(w.c.options.AppPath, "assets", "legal")
-	if w.c.options.Packaged {
-		root = filepath.Join(w.c.options.Resources, "legal")
-	}
-	if failure := platform.OpenPath(filepath.Join(root, "THIRD-PARTY-NOTICES.txt")); failure != "" {
-		return errors.New(failure)
-	}
-	return nil
+	return w.c.app.openSourceLicenses(w.c.options.Packaged, w.c.options.Resources, w.c.options.AppPath)
 }
 
 func (w *windowDesktop) OpenFile(_ context.Context, roots []string, path string, line *float64) error {

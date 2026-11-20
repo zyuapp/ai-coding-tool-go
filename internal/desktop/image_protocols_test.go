@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 type fakeImages struct {
 	name, thread string
-	query        MessageImageQuery
+	query        contracts.ComputerQueryMessageImage
 }
 
 func (images *fakeImages) Attachment(ctx context.Context, name, thread string) ([]byte, error) {
@@ -22,7 +24,7 @@ func (images *fakeImages) Attachment(ctx context.Context, name, thread string) (
 	return []byte("png"), nil
 }
 
-func (images *fakeImages) MessageImage(ctx context.Context, query MessageImageQuery, thread string) ([]byte, string, error) {
+func (images *fakeImages) MessageImage(ctx context.Context, query contracts.ComputerQueryMessageImage, thread string) ([]byte, string, error) {
 	images.query, images.thread = query, thread
 	return []byte("jpeg"), "image/jpeg", nil
 }
@@ -47,8 +49,8 @@ func TestAppSchemes(t *testing.T) {
 	}
 
 	response = serve(handler, "/__app/message-image?path=img.png&root=%2Frepo&message=m1&thumbnail=1&taskId=t2")
-	want := MessageImageQuery{Path: "img.png", Root: "/repo", Message: "m1", Thumbnail: true}
-	if response.Code != 200 || images.query != want || images.thread != "t2" || response.Header().Get("Content-Type") != "image/jpeg" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+	got := images.query
+	if response.Code != 200 || got.Path != "img.png" || got.Root != "/repo" || got.Message != "m1" || got.Thumbnail == nil || !*got.Thumbnail || images.thread != "t2" || response.Header().Get("Content-Type") != "image/jpeg" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("message image: %d %+v %q", response.Code, images.query, images.thread)
 	}
 

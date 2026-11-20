@@ -13,6 +13,11 @@ import (
 // and length, maps when they are the same map, pointers, funcs and channels when equal.
 // Interfaces compare their dynamic values the same way; other comparable values compare with ==,
 // and values that are none of these are never the same.
+//
+// Go backs every zero-capacity slice with one shared address, so two empty slices built apart
+// (`[]T{}`, `make([]T, 0)`, slices.Clone of an empty slice) are the same here although TypeScript's
+// `[]` literals are not. A new list whose identity is checked against one that may also be empty is
+// built with Fresh.
 func Same[T any](a, b T) bool {
 	return same(reflect.ValueOf(&a).Elem(), reflect.ValueOf(&b).Elem())
 }
@@ -37,6 +42,12 @@ func same(a, b reflect.Value) bool {
 		return a.Equal(b)
 	}
 	return false
+}
+
+// Fresh is a new slice of the given length with a backing array of its own even when empty, so it is
+// never Same as any other slice.
+func Fresh[E any](length int) []E {
+	return make([]E, length, max(length, 1))
 }
 
 // SameSlice is Same for slices without reflection.

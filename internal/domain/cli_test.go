@@ -44,7 +44,7 @@ func TestCliScriptIsOursAndOpensTheFolder(t *testing.T) {
 	if !IsCliScript(script) || !IsCliScript("#!/bin/sh\n# aic-cli v1\n") || IsCliScript("#!/bin/sh\necho hi\n") || !strings.HasPrefix(script, "#!/bin/sh\n") {
 		t.Fatal("stamp")
 	}
-	for _, pattern := range []string{`exec open "aicodingtool://open\?path=\$encoded"`, `ELECTRON_RUN_AS_NODE=1 '/Applications/AI Coding Tool.app/Contents/MacOS/AI Coding Tool' -e`} {
+	for _, pattern := range []string{`exec open "aicodingtool://open\?path=\$encoded"`, `env AIC_SERVE_RESTARTS=1 '/Applications/AI Coding Tool.app/Contents/MacOS/AI Coding Tool' "\$@" <&0 &`} {
 		if !regexp.MustCompile(pattern).MatchString(script) {
 			t.Error(pattern)
 		}
@@ -143,7 +143,7 @@ func TestCliScriptServesAndRestartsAfterAnUpdate(t *testing.T) {
 	restarted := filepath.Join(root, "restarted")
 	cliMust(t, os.WriteFile(app, []byte(strings.Join([]string{
 		"#!/bin/sh",
-		`printf '%s|' "$ELECTRON_RUN_AS_NODE" "$` + ServeRestartsEnv + `" "$@" >> "` + seen + `"; echo >> "` + seen + `"`,
+		`printf '%s|' "$` + ServeRestartsEnv + `" "$@" >> "` + seen + `"; echo >> "` + seen + `"`,
 		`[ -e "` + restarted + `" ] && exit 3`,
 		`: > "` + restarted + `"; exit ` + strconv.Itoa(ServeRestartExit),
 		"",
@@ -154,7 +154,7 @@ func TestCliScriptServesAndRestartsAfterAnUpdate(t *testing.T) {
 		var runs [][]string
 		for _, line := range strings.Split(strings.TrimRight(string(output), "\n"), "\n") {
 			fields := strings.Split(line, "|")
-			runs = append(runs, append(fields[:3:3], fields[4:]...))
+			runs = append(runs, fields)
 		}
 		return runs
 	}
@@ -168,7 +168,7 @@ func TestCliScriptServesAndRestartsAfterAnUpdate(t *testing.T) {
 	if status := exitCode(exec.Command(command, "serve", "--port", "0").Run()); status != 3 {
 		t.Fatalf("serve status %d", status)
 	}
-	serve := []string{"1", "1", "-e", "--", "serve", "--port", "0", ""}
+	serve := []string{"1", "serve", "--port", "0", ""}
 	if got := runs(); !reflect.DeepEqual(got, [][]string{serve, serve}) {
 		t.Fatalf("serve runs %q", got)
 	}
@@ -176,7 +176,7 @@ func TestCliScriptServesAndRestartsAfterAnUpdate(t *testing.T) {
 	if status := exitCode(exec.Command(command, "pair", "--dev").Run()); status != ServeRestartExit {
 		t.Fatalf("pair status %d", status)
 	}
-	if got := runs(); !reflect.DeepEqual(got, [][]string{{"1", "", "-e", "--", "pair", "--dev", ""}}) {
+	if got := runs(); !reflect.DeepEqual(got, [][]string{{"", "pair", "--dev", ""}}) {
 		t.Fatalf("pair runs %q", got)
 	}
 }

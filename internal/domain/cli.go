@@ -23,9 +23,6 @@ const ServeRestartExit = 75
 // ServeRestartsEnv is set by a script that restarts `aic serve` on ServeRestartExit.
 const ServeRestartsEnv = "AIC_SERVE_RESTARTS"
 
-// ServeBootstrap is run by the app binary as Node: it finds the packaged serve entry beside it and starts it.
-const ServeBootstrap = `(function(){var p=require("path"),f=require("fs"),d=p.dirname(process.execPath);var c=[p.join(d,"resources"),p.join(d,"..","Resources")];for(var i=0;i<c.length;i++){var s=p.join(c[i],"app.asar","dist","main","main","serve.js");if(f.existsSync(s))return require(s).cli()}console.error("aic: could not find AI Coding Tool beside "+process.execPath);process.exit(1)})()`
-
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
@@ -34,8 +31,9 @@ func refusal() []string {
 	return []string{"    printf '" + CliCommand + ": this install cannot serve. Install the command again from AI Coding Tool.\\n' >&2", "    exit 1"}
 }
 
-func appAsNode(executable string) string {
-	return shellQuote(executable) + " -e " + shellQuote(ServeBootstrap) + ` -- "$@"`
+// appCommand runs the app binary with the script's arguments, whose first is `serve` or `pair`.
+func appCommand(executable string) string {
+	return shellQuote(executable) + ` "$@"`
 }
 
 // serveLines takes "" for no executable.
@@ -44,7 +42,7 @@ func serveLines(executable string) []string {
 		return refusal()
 	}
 	return []string{
-		"    env " + ServeRestartsEnv + "=1 ELECTRON_RUN_AS_NODE=1 " + appAsNode(executable) + " <&0 &",
+		"    env " + ServeRestartsEnv + "=1 " + appCommand(executable) + " <&0 &",
 		"    child=$!",
 		"    trap : INT",
 		`    trap 'kill -TERM "$child" 2>/dev/null' TERM HUP`,
@@ -59,7 +57,7 @@ func pairLines(executable string) []string {
 	if executable == "" {
 		return refusal()
 	}
-	return []string{"    exec env ELECTRON_RUN_AS_NODE=1 " + appAsNode(executable)}
+	return []string{"    exec " + appCommand(executable)}
 }
 
 func cliScript(opener []string, executable string) string {

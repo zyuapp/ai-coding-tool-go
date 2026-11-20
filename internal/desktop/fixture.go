@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 // Fixture stands in for the workspace runtime with one saved WorkspaceState: a snapshot request
@@ -117,6 +119,6 @@ func (fixture *Fixture) Attachment(ctx context.Context, name, thread string) ([]
 	return os.ReadFile(filepath.Join(fixture.attachments, name))
 }
 
-func (fixture *Fixture) MessageImage(ctx context.Context, query MessageImageQuery, thread string) ([]byte, string, error) {
+func (fixture *Fixture) MessageImage(ctx context.Context, query contracts.ComputerQueryMessageImage, thread string) ([]byte, string, error) {
 	return nil, "", errFixture
 }

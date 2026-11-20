@@ -33,7 +33,13 @@ func (app *App) appMenu() *menu.Menu {
 	appMenu.AddText("Quit "+name, keys.CmdOrCtrl("q"), func(*menu.CallbackData) { runtime.Quit(app.context()) })
 
 	file := root.AddSubmenu("File")
-	file.AddText("Close Window", keys.CmdOrCtrl("w"), func(*menu.CallbackData) { runtime.WindowHide(app.context()); go app.windowClosing() })
+	file.AddText("Close Window", keys.CmdOrCtrl("w"), func(*menu.CallbackData) {
+		if app.nativeCloseLicenses() {
+			return
+		}
+		runtime.WindowHide(app.context())
+		go app.windowClosing()
+	})
 
 	root.Append(menu.EditMenu())
 

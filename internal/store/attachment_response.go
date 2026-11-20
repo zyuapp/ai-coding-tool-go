@@ -3,21 +3,15 @@ package store
 import (
 	"net/http"
 	"net/url"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 // ImageReads is the part of the computer reads (main/computer-queries.ts) the image protocols use:
 // each read is answered by the computer holding thread, or by this one when thread is nil.
 type ImageReads interface {
 	ReadAttachment(name string, thread *string) ([]byte, error)
-	ReadMessageImage(query MessageImageQuery, thread *string) (MessageImage, error)
-}
-
-// MessageImageQuery is contracts' { kind: "message-image" } computer query.
-type MessageImageQuery struct {
-	Path      string
-	Root      string
-	Message   string
-	Thumbnail bool
+	ReadMessageImage(query contracts.ComputerQueryMessageImage, thread *string) (MessageImage, error)
 }
 
 // ImageResponse is what an image protocol answers a request with.

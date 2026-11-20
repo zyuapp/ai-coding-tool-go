@@ -27,5 +27,16 @@ void actWatchTransparency(void);
 void actSetBadge(int count);
 void actTitlebarDoubleClick(void);
 char *actFontFamilies(void);
+char *actPasteboardFiles(void);
+
+typedef struct {
+  int status;
+  char *contentType;
+  char *csp;
+  void *body;
+  int length;
+} ActLicenseAnswer;
+void actOpenLicenses(void);
+int actCloseLicensesIfKey(void);
 
 #endif

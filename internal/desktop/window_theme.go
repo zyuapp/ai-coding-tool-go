@@ -5,41 +5,35 @@ import (
 	"os"
 	"strconv"
 	"sync"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
-// WindowTheme mirrors contracts/ipc.ts: the theme's canvas and ground, which the frame is drawn from.
-type WindowTheme struct {
-	Variant string `json:"variant"`
-	Canvas  string `json:"canvas"`
-	// Whether the renderer took this ground from the system, in which case native chrome asks it too.
-	Follow *bool `json:"follow,omitzero"`
-}
-
 // DefaultWindowTheme is the theme of a first launch.
-var DefaultWindowTheme = WindowTheme{Variant: "dark", Canvas: "#0e1117"}
+var DefaultWindowTheme = contracts.WindowTheme{Variant: contracts.WindowThemeVariantDark, Canvas: "#0e1117"}
 
 const ThemeFile = "window-theme.v1.json"
 
-func (theme WindowTheme) follows() bool { return theme.Follow != nil && *theme.Follow }
+func themeFollows(theme contracts.WindowTheme) bool { return theme.Follow != nil && *theme.Follow }
 
-func (theme WindowTheme) same(other WindowTheme) bool {
-	return theme.Variant == other.Variant && theme.Canvas == other.Canvas && theme.follows() == other.follows()
+func sameTheme(a, b contracts.WindowTheme) bool {
+	return a.Variant == b.Variant && a.Canvas == b.Canvas && themeFollows(a) == themeFollows(b)
 }
 
-func parseWindowTheme(data []byte) (WindowTheme, bool) {
+func parseWindowTheme(data []byte) (contracts.WindowTheme, bool) {
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil || !isWindowThemeValue(value, true) {
-		return WindowTheme{}, false
+		return contracts.WindowTheme{}, false
 	}
-	var theme WindowTheme
+	var theme contracts.WindowTheme
 	if err := json.Unmarshal(data, &theme); err != nil {
-		return WindowTheme{}, false
+		return contracts.WindowTheme{}, false
 	}
 	return theme, true
 }
 
 // LoadWindowTheme reads the remembered theme; an unreadable file means the default.
-func LoadWindowTheme(file string) WindowTheme {
+func LoadWindowTheme(file string) contracts.WindowTheme {
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return DefaultWindowTheme
@@ -64,7 +58,7 @@ type themeWriter struct {
 	mu sync.Mutex
 }
 
-func (writer *themeWriter) remember(file string, theme WindowTheme) {
+func (writer *themeWriter) remember(file string, theme contracts.WindowTheme) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
 	data, err := json.Marshal(theme)

@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 )
 
 // The window's own schemes (`attachment:`, `message-image:`, `aicodingtool-visual:`) are served
@@ -61,7 +63,7 @@ func messageImageResponse(writer http.ResponseWriter, request *http.Request, ima
 		return
 	}
 	params := request.URL.Query()
-	query := MessageImageQuery{Path: params.Get("path"), Root: params.Get("root"), Message: params.Get("message"), Thumbnail: params.Get("thumbnail") == "1"}
+	query := contracts.ComputerQueryMessageImage{Path: params.Get("path"), Root: params.Get("root"), Message: params.Get("message"), Thumbnail: new(params.Get("thumbnail") == "1")}
 	bytes, contentType, err := images.MessageImage(request.Context(), query, params.Get("taskId"))
 	if err != nil {
 		notFound(writer, "Image unavailable")

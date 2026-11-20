@@ -127,14 +127,13 @@ func Open(ctx context.Context, config Config) (*Services, error) {
 	database, err := store.OpenTaskDatabaseService(filepath.Join(config.UserData, store.TaskDatabaseFile), store.OpenOptions{
 		WorktreesRoots:      config.WorktreesRoots(),
 		CutOverCodexThreads: true,
-		Domain:              store.DomainReading(),
 		JSON:                []json.Options{jsonx.Options()},
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.Database = database
-	s.Tasks = TaskDatabase{Store: database}
+	s.Tasks = newTaskDatabase(database)
 
 	s.Engines = engines.New(pluginRoot)
 	s.ToolHost = tools.NewMcpHTTPHost()

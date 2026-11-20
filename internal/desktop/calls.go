@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 
+	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
 	"github.com/zyuapp/ai-coding-tool-go/internal/jsonx"
 )
@@ -157,11 +158,11 @@ func (c *Controller) Attachment(ctx context.Context, name, thread string) ([]byt
 }
 
 // MessageImage reads an image a reply linked, or its thumbnail, from whichever computer holds the thread.
-func (c *Controller) MessageImage(ctx context.Context, query MessageImageQuery, thread string) ([]byte, string, error) {
+func (c *Controller) MessageImage(ctx context.Context, query contracts.ComputerQueryMessageImage, thread string) ([]byte, string, error) {
 	if !c.waitReady(ctx) {
 		return nil, "", ctx.Err()
 	}
-	image, err := c.services.Reads.MessageImage(ctx, query.Path, query.Root, query.Message, query.Thumbnail, threadOwner(thread))
+	image, err := c.services.Reads.MessageImage(ctx, query.Path, query.Root, query.Message, query.Thumbnail != nil && *query.Thumbnail, threadOwner(thread))
 	return image.Bytes, image.ContentType, err
 }
 

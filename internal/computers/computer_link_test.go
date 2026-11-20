@@ -183,8 +183,8 @@ func TestSendInFlightWhenTheOtherComputerRestartsIsRefused(t *testing.T) {
 		sent <- err
 	}()
 	until(t, "the send reaching the host", func() bool { return served.renames() == 1 })
-	served.call("release", nil)
 	line.cut()
+	served.call("release", nil)
 	served.call("restart", nil)
 	if err := <-sent; err == nil || err.Error() != ComputerRestarted {
 		t.Fatalf("expected the restart refusal, got %v", err)

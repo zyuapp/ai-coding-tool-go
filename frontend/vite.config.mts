@@ -35,17 +35,20 @@ function latinFontSubsets(): Plugin {
 
 const APP_REGION = /-webkit-app-region\s*:\s*(no-drag|drag)/g;
 const STABLE_GUTTER = /scrollbar-gutter\s*:\s*stable(?=\s*[;}])/g;
+const UI_MONOSPACE = /\bui-monospace\s*,\s*/g;
 
 /**
  * What the system web view reads differently from Chromium. Electron reads `-webkit-app-region` to
  * find the window's drag regions; Wails reads a property of its own, which inherits the same way.
  * WebKit reserves no stable gutter beside a styled scrollbar, so such a box always takes its
- * scrollbar, whose track is clear, which keeps the same room.
+ * scrollbar, whose track is clear, which keeps the same room. Chromium has no `ui-monospace`, so
+ * Electron draws a mono stack that starts with it in the next family, Menlo; WebKit skips it too.
  */
 function webViewAdapters(): Plugin {
   const withWailsRegion = (css: string) => css
     .replace(APP_REGION, (declaration, value) => `${declaration};--wails-draggable:${value}`)
-    .replace(STABLE_GUTTER, (declaration) => `${declaration};overflow-y:scroll!important`);
+    .replace(STABLE_GUTTER, (declaration) => `${declaration};overflow-y:scroll!important`)
+    .replace(UI_MONOSPACE, "");
   let serving = false;
   return {
     name: "web-view-adapters",

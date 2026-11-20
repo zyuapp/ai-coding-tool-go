@@ -8,6 +8,7 @@ import (
 
 	"github.com/zyuapp/ai-coding-tool-go/internal/contracts"
 	"github.com/zyuapp/ai-coding-tool-go/internal/domain"
+	"github.com/zyuapp/ai-coding-tool-go/internal/jsonx"
 )
 
 func IsComputerInput(input WorkspaceInput) bool {
@@ -39,8 +40,7 @@ func computerCommandsLinked(state *WorkspaceState, links []*domain.ComputerLink)
 	for _, computer := range state.Computers.Paired {
 		held[computer.ID] = computer
 	}
-	// Capacity at least 1: a new list is never the same as the last by jsonx.Same, even when both are empty.
-	paired := make([]*PairedComputer, len(links), max(len(links), 1))
+	paired := jsonx.Fresh[*PairedComputer](len(links))
 	for index, link := range links {
 		known := held[link.ID]
 		if known != nil && known.Status == link.Status && sameOptionalText(known.Error, link.Error) && known.Name == link.Name && known.Host == link.Host && slices.Equal(known.Capabilities, link.Capabilities) && (known.Capabilities == nil) == (link.Capabilities == nil) {
