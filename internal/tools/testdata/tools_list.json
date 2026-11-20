@@ -1,0 +1,638 @@
+{
+ "threads": [
+  {
+   "name": "list_threads",
+   "description": "List the other AICodingTool threads, newest activity first. Set computer to \"all\" to include paired computers. Use when the user asks what else is going on, points at recent or related work, or describes threads by age rather than by name.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"computer\":{\"description\":\"\\\"this\\\" (the default), \\\"all\\\" paired computers and this one, or a paired computer named by its name or ID. With \\\"all\\\" or a paired computer selected, project defaults to \\\"all\\\". Remote rows include their computer and whether it is offline.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"project\":{\"description\":\"\\\"current\\\" (the default) for the project this thread belongs to, \\\"all\\\" for every project, or a project named by its folder name or its path.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"archived\":{\"description\":\"List archived threads instead of active ones.\",\"type\":\"boolean\"},\"idleMinutes\":{\"description\":\"Only threads that have done nothing for at least this many minutes.\",\"type\":\"number\",\"minimum\":0},\"search\":{\"description\":\"Only threads whose title or messages contain this text.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":1000},\"hasImages\":{\"description\":\"Only threads where a message carries an image.\",\"type\":\"boolean\"},\"limit\":{\"description\":\"How many threads to return. Defaults to 20.\",\"type\":\"number\",\"minimum\":0}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "read_thread",
+   "description": "Read another thread's transcript, including threads on paired computers. Use a known ID directly, including one supplied in app context or an aicodingtool://thread/<id> link. The app resolves its computer automatically. Use list_threads first only when the target is unknown.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"computer\":{\"description\":\"Optional computer name or ID, or \\\"this\\\" for local threads. Omit to resolve the thread across this computer and paired computers. Use to disambiguate matching threads.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"limit\":{\"description\":\"How many of the newest messages to read. Defaults to 30.\",\"type\":\"number\",\"minimum\":0}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "wait_for_thread",
+   "description": "Wait until a thread stops working and report what it last said. Use after start_thread or message_thread when the user is waiting on that work; polling read_thread instead just burns turns. A wait that runs out says so, and calling it again keeps waiting.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"timeoutSeconds\":{\"description\":\"How long to wait before reporting back regardless. Defaults to 300, and cannot exceed 900.\",\"type\":\"number\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "start_thread",
+   "description": "Start a new AICodingTool thread on its own prompt and run it. Use when the user asks for separate pieces of work to run side by side, one thread per piece. The new thread runs with the permission policy the app is set to on the computer it runs on, except a reviewer, which starts on Auto, or on Bypass where its engine has no Auto; write a prompt that stands on its own. It starts in this thread's checkout, worktree included. Pass worktree to give it an isolated checkout instead, which is what you want when it edits the same files as this thread.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The first message of the new thread. It has none of this conversation's context, so say everything it needs.\"},\"title\":{\"description\":\"A few words naming what the new thread does, shown wherever it is listed. Omit to have it named from its prompt.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"project\":{\"description\":\"Which project to start it in: its folder name, its path, or its id. Defaults to this thread's project, or on a paired computer the project there at the same path or with the same folder name.\",\"type\":\"string\",\"maxLength\":4096},\"worktree\":{\"description\":\"Run the new thread in its own new git worktree, detached at whatever the project has checked out, so its edits never touch this thread's checkout. Name files in its prompt relative to the project, never by this checkout's absolute path, which would send it back here.\",\"type\":\"boolean\"},\"worktreeId\":{\"description\":\"Start the thread in another worktree that already exists, as list_threads reports it, on the computer it starts on. Omit both worktree fields to share this thread's checkout. Takes precedence over worktree.\",\"type\":\"string\",\"maxLength\":256},\"model\":{\"description\":\"Model for the new thread: one of fable, opus, sonnet, haiku, gpt-6.2-astra (Astra), gpt-6.2-sol (Sol), gpt-6.1-terra (Terra), gpt-6-luna (Luna); an engine (claude, codex, opencode) for that engine's default model; or any other model in the app's model picker. Name a model by its id or by the name the picker shows; a name several providers offer resolves to the one the user pinned. Omit to inherit the calling thread's model.\",\"type\":\"string\",\"maxLength\":256},\"engine\":{\"description\":\"The engine to run model on, needed only when more than one engine offers it.\",\"type\":\"string\",\"enum\":[\"claude\",\"codex\",\"opencode\"]},\"effort\":{\"description\":\"Effort for the new thread. Omit to inherit the calling thread's effort when the selected model supports it, otherwise use that engine's default.\",\"type\":\"string\",\"enum\":[\"ultra\",\"max\",\"xhigh\",\"high\",\"medium\",\"low\"]},\"role\":{\"description\":\"The part the new thread plays beside the others: coordinator, implementer, reviewer, or researcher. Set reviewer for review threads; a reviewer starts on Auto, or on Bypass where its engine has no Auto, and stays in Threads unless it needs the user's approval.\",\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},\"intent\":{\"description\":\"Part of the brief a coordinator must give: the user's own words for this piece of work.\",\"type\":\"string\",\"maxLength\":4000},\"doneWhen\":{\"description\":\"Part of the brief a coordinator must give: what finished looks like, checkably.\",\"type\":\"string\",\"maxLength\":4000},\"delivers\":{\"description\":\"Part of the brief a coordinator must give: pull-request, commit, or report (knowledge only, no code changes).\",\"type\":\"string\",\"enum\":[\"pull-request\",\"commit\",\"report\"]},\"computer\":{\"description\":\"A paired computer to start it on, named by its name or ID, or \\\"this\\\" (the default). There it starts in the project checkout unless worktree or worktreeId says otherwise.\",\"type\":\"string\",\"maxLength\":256}},\"required\":[\"prompt\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "message_thread",
+   "description": "Send a message to another thread, on this computer or a paired one. A thread that is working reads it in the run already going, and an idle one starts a run on it. To learn where a thread stands, read it with read_thread instead.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The message to send.\"}},\"required\":[\"threadId\",\"text\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "set_thread_role",
+   "description": "Give a thread its part beside the others, or take it off. The role shows on the thread's row and in list_threads. A coordinator changes no files itself and delegates to threads it starts, and keeps its role until the user changes it; the other roles change nothing about what the thread may do.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"role\":{\"anyOf\":[{\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},{\"type\":\"null\"}],\"description\":\"coordinator, implementer, reviewer, or researcher. null takes the role off.\"}},\"required\":[\"threadId\",\"role\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "archive_thread",
+   "description": "Archive a thread, which also cancels a run it still has going and retires its automation. Archived threads stay recoverable for five days. This throws away work in progress, so only archive when the user asked for it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "dismiss_thread",
+   "description": "Dismiss a thread, taking it out of Priority as the sidebar's Dismiss does. Use when the user asks to dismiss a thread, such as this one once its last step is done. Dismissing this thread while it runs takes effect when this turn finishes; a turn that fails still surfaces.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"description\":\"The thread's ID, an unambiguous prefix of it, or its exact title. Omit to dismiss this thread.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "move_to_worktree",
+   "description": "Move a thread into a new worktree, one the project already has, or back to the project checkout, as the thread menu's Move to worktree does. This is how a thread works in a worktree: use it whenever the user asks for one, never git worktree, so the app knows where the thread works. File changes already made stay in the old checkout. Moving this thread waits for this turn to end, and its next turn starts in the new checkout, on its own when you pass then. Another thread must not be running.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"description\":\"The thread to move: its ID, an unambiguous prefix of it, or its exact title. Omit or null to move this thread.\",\"anyOf\":[{\"type\":\"string\",\"maxLength\":256},{\"type\":\"null\"}]},\"worktreeId\":{\"anyOf\":[{\"type\":\"string\",\"maxLength\":256},{\"type\":\"null\"}],\"description\":\"\\\"new\\\" for a new worktree, the ID of one list_threads reports, or null for the project checkout.\"},\"then\":{\"anyOf\":[{\"type\":\"string\",\"maxLength\":1000000},{\"type\":\"null\"}],\"description\":\"When moving this thread, whatever else the user asked for along with the move, written as instructions to yourself. This thread's next turn starts in the new checkout on its own with it. null when the move is all the user asked for, or when moving another thread.\"}},\"required\":[\"worktreeId\",\"then\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "delete_worktree",
+   "description": "Delete a worktree the app made, by the id list_threads reports. Uncommitted work is committed first so it stays recoverable, then the folder is removed; git-ignored files are lost. Every thread in it moves back to the project checkout. Refused while any of those threads is running. Only delete when the user asked for it, such as cleaning up after coordinated work is done.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"worktreeId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The worktree's ID, as list_threads reports it.\"}},\"required\":[\"worktreeId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "stop_thread",
+   "description": "Stop the run a thread has going, leaving the thread itself alone. This throws away work in progress, so only stop a run when the user asked for it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "threadsCoordinator": [
+  {
+   "name": "list_threads",
+   "description": "List the other AICodingTool threads, newest activity first. Set computer to \"all\" to include paired computers. Use when the user asks what else is going on, points at recent or related work, or describes threads by age rather than by name.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"computer\":{\"description\":\"\\\"this\\\" (the default), \\\"all\\\" paired computers and this one, or a paired computer named by its name or ID. With \\\"all\\\" or a paired computer selected, project defaults to \\\"all\\\". Remote rows include their computer and whether it is offline.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"project\":{\"description\":\"\\\"current\\\" (the default) for the project this thread belongs to, \\\"all\\\" for every project, or a project named by its folder name or its path.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"archived\":{\"description\":\"List archived threads instead of active ones.\",\"type\":\"boolean\"},\"idleMinutes\":{\"description\":\"Only threads that have done nothing for at least this many minutes.\",\"type\":\"number\",\"minimum\":0},\"search\":{\"description\":\"Only threads whose title or messages contain this text.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":1000},\"hasImages\":{\"description\":\"Only threads where a message carries an image.\",\"type\":\"boolean\"},\"limit\":{\"description\":\"How many threads to return. Defaults to 20.\",\"type\":\"number\",\"minimum\":0}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "read_thread",
+   "description": "Read another thread's transcript, including threads on paired computers. Use a known ID directly, including one supplied in app context or an aicodingtool://thread/<id> link. The app resolves its computer automatically. Use list_threads first only when the target is unknown.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"computer\":{\"description\":\"Optional computer name or ID, or \\\"this\\\" for local threads. Omit to resolve the thread across this computer and paired computers. Use to disambiguate matching threads.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"limit\":{\"description\":\"How many of the newest messages to read. Defaults to 30.\",\"type\":\"number\",\"minimum\":0}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "start_thread",
+   "description": "Start a new AICodingTool thread on its own prompt and run it. Use when the user asks for separate pieces of work to run side by side, one thread per piece. The new thread runs with the permission policy the app is set to on the computer it runs on, except a reviewer, which starts on Auto, or on Bypass where its engine has no Auto; write a prompt that stands on its own. It starts in this thread's checkout, worktree included. Pass worktree to give it an isolated checkout instead, which is what you want when it edits the same files as this thread.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The first message of the new thread. It has none of this conversation's context, so say everything it needs.\"},\"title\":{\"description\":\"A few words naming what the new thread does, shown wherever it is listed. Omit to have it named from its prompt.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"project\":{\"description\":\"Which project to start it in: its folder name, its path, or its id. Defaults to this thread's project, or on a paired computer the project there at the same path or with the same folder name.\",\"type\":\"string\",\"maxLength\":4096},\"worktree\":{\"description\":\"Run the new thread in its own new git worktree, detached at whatever the project has checked out, so its edits never touch this thread's checkout. Name files in its prompt relative to the project, never by this checkout's absolute path, which would send it back here.\",\"type\":\"boolean\"},\"worktreeId\":{\"description\":\"Start the thread in another worktree that already exists, as list_threads reports it, on the computer it starts on. Omit both worktree fields to share this thread's checkout. Takes precedence over worktree.\",\"type\":\"string\",\"maxLength\":256},\"model\":{\"description\":\"Model for the new thread: one of fable, opus, sonnet, haiku, gpt-6.2-astra (Astra), gpt-6.2-sol (Sol), gpt-6.1-terra (Terra), gpt-6-luna (Luna); an engine (claude, codex, opencode) for that engine's default model; or any other model in the app's model picker. Name a model by its id or by the name the picker shows; a name several providers offer resolves to the one the user pinned. Omit to run it on the model this coordinator's threads run on.\",\"type\":\"string\",\"maxLength\":256},\"engine\":{\"description\":\"The engine to run model on, needed only when more than one engine offers it.\",\"type\":\"string\",\"enum\":[\"claude\",\"codex\",\"opencode\"]},\"effort\":{\"description\":\"Effort for the new thread. Omit to run it at the effort this coordinator's threads run at, or the nearest one the selected model takes.\",\"type\":\"string\",\"enum\":[\"ultra\",\"max\",\"xhigh\",\"high\",\"medium\",\"low\"]},\"role\":{\"description\":\"The part the new thread plays beside the others: coordinator, implementer, reviewer, or researcher. Set reviewer for review threads; a reviewer starts on Auto, or on Bypass where its engine has no Auto, and stays in Threads unless it needs the user's approval.\",\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},\"intent\":{\"description\":\"Part of the brief a coordinator must give: the user's own words for this piece of work.\",\"type\":\"string\",\"maxLength\":4000},\"doneWhen\":{\"description\":\"Part of the brief a coordinator must give: what finished looks like, checkably.\",\"type\":\"string\",\"maxLength\":4000},\"delivers\":{\"description\":\"Part of the brief a coordinator must give: pull-request, commit, or report (knowledge only, no code changes).\",\"type\":\"string\",\"enum\":[\"pull-request\",\"commit\",\"report\"]},\"computer\":{\"description\":\"A paired computer to run it on. It starts there once the user allows it.\",\"type\":\"string\",\"maxLength\":256}},\"required\":[\"prompt\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "message_thread",
+   "description": "Send a message to another thread, on this computer or a paired one. A thread that is working reads it in the run already going, and an idle one starts a run on it. To learn where a thread stands, read it with read_thread instead.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The message to send.\"}},\"required\":[\"threadId\",\"text\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "set_thread_role",
+   "description": "Give a thread its part beside the others, or take it off. The role shows on the thread's row and in list_threads. A coordinator changes no files itself and delegates to threads it starts, and keeps its role until the user changes it; the other roles change nothing about what the thread may do.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"role\":{\"anyOf\":[{\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},{\"type\":\"null\"}],\"description\":\"coordinator, implementer, reviewer, or researcher. null takes the role off.\"}},\"required\":[\"threadId\",\"role\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "archive_thread",
+   "description": "Archive a thread, which also cancels a run it still has going and retires its automation. Archived threads stay recoverable for five days. This throws away work in progress, so only archive when the user asked for it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "dismiss_thread",
+   "description": "Dismiss a thread, taking it out of Priority as the sidebar's Dismiss does. Use when the user asks to dismiss a thread, such as this one once its last step is done. Dismissing this thread while it runs takes effect when this turn finishes; a turn that fails still surfaces.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"description\":\"The thread's ID, an unambiguous prefix of it, or its exact title. Omit to dismiss this thread.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "delete_worktree",
+   "description": "Delete a worktree the app made, by the id list_threads reports. Uncommitted work is committed first so it stays recoverable, then the folder is removed; git-ignored files are lost. Every thread in it moves back to the project checkout. Refused while any of those threads is running. Only delete when the user asked for it, such as cleaning up after coordinated work is done.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"worktreeId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The worktree's ID, as list_threads reports it.\"}},\"required\":[\"worktreeId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "stop_thread",
+   "description": "Stop the run a thread has going, leaving the thread itself alone. This throws away work in progress, so only stop a run when the user asked for it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "threadsMember": [
+  {
+   "name": "list_threads",
+   "description": "List the other AICodingTool threads, newest activity first. Set computer to \"all\" to include paired computers. Use when the user asks what else is going on, points at recent or related work, or describes threads by age rather than by name.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"computer\":{\"description\":\"\\\"this\\\" (the default), \\\"all\\\" paired computers and this one, or a paired computer named by its name or ID. With \\\"all\\\" or a paired computer selected, project defaults to \\\"all\\\". Remote rows include their computer and whether it is offline.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"project\":{\"description\":\"\\\"current\\\" (the default) for the project this thread belongs to, \\\"all\\\" for every project, or a project named by its folder name or its path.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"archived\":{\"description\":\"List archived threads instead of active ones.\",\"type\":\"boolean\"},\"idleMinutes\":{\"description\":\"Only threads that have done nothing for at least this many minutes.\",\"type\":\"number\",\"minimum\":0},\"search\":{\"description\":\"Only threads whose title or messages contain this text.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":1000},\"hasImages\":{\"description\":\"Only threads where a message carries an image.\",\"type\":\"boolean\"},\"limit\":{\"description\":\"How many threads to return. Defaults to 20.\",\"type\":\"number\",\"minimum\":0}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "read_thread",
+   "description": "Read another thread's transcript, including threads on paired computers. Use a known ID directly, including one supplied in app context or an aicodingtool://thread/<id> link. The app resolves its computer automatically. Use list_threads first only when the target is unknown.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"computer\":{\"description\":\"Optional computer name or ID, or \\\"this\\\" for local threads. Omit to resolve the thread across this computer and paired computers. Use to disambiguate matching threads.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"limit\":{\"description\":\"How many of the newest messages to read. Defaults to 30.\",\"type\":\"number\",\"minimum\":0}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "wait_for_thread",
+   "description": "Wait until a thread stops working and report what it last said. Use after start_thread or message_thread when the user is waiting on that work; polling read_thread instead just burns turns. A wait that runs out says so, and calling it again keeps waiting.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"timeoutSeconds\":{\"description\":\"How long to wait before reporting back regardless. Defaults to 300, and cannot exceed 900.\",\"type\":\"number\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "start_thread",
+   "description": "Start a new AICodingTool thread on its own prompt and run it. Use when the user asks for separate pieces of work to run side by side, one thread per piece. The new thread runs with the permission policy the app is set to on the computer it runs on, except a reviewer, which starts on Auto, or on Bypass where its engine has no Auto; write a prompt that stands on its own. It starts in this thread's checkout, worktree included. Pass worktree to give it an isolated checkout instead, which is what you want when it edits the same files as this thread.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The first message of the new thread. It has none of this conversation's context, so say everything it needs.\"},\"title\":{\"description\":\"A few words naming what the new thread does, shown wherever it is listed. Omit to have it named from its prompt.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"project\":{\"description\":\"Which project to start it in: its folder name, its path, or its id. Defaults to this thread's project, or on a paired computer the project there at the same path or with the same folder name.\",\"type\":\"string\",\"maxLength\":4096},\"worktree\":{\"description\":\"Run the new thread in its own new git worktree, detached at whatever the project has checked out, so its edits never touch this thread's checkout. Name files in its prompt relative to the project, never by this checkout's absolute path, which would send it back here.\",\"type\":\"boolean\"},\"worktreeId\":{\"description\":\"Start the thread in another worktree that already exists, as list_threads reports it, on the computer it starts on. Omit both worktree fields to share this thread's checkout. Takes precedence over worktree.\",\"type\":\"string\",\"maxLength\":256},\"model\":{\"description\":\"Model for the new thread: one of fable, opus, sonnet, haiku, gpt-6.2-astra (Astra), gpt-6.2-sol (Sol), gpt-6.1-terra (Terra), gpt-6-luna (Luna); an engine (claude, codex, opencode) for that engine's default model; or any other model in the app's model picker. Name a model by its id or by the name the picker shows; a name several providers offer resolves to the one the user pinned. Omit to run it on the model your coordinator's threads run on.\",\"type\":\"string\",\"maxLength\":256},\"engine\":{\"description\":\"The engine to run model on, needed only when more than one engine offers it.\",\"type\":\"string\",\"enum\":[\"claude\",\"codex\",\"opencode\"]},\"effort\":{\"description\":\"Effort for the new thread. Omit to run it at the effort your coordinator's threads run at, or the nearest one the selected model takes.\",\"type\":\"string\",\"enum\":[\"ultra\",\"max\",\"xhigh\",\"high\",\"medium\",\"low\"]},\"role\":{\"description\":\"The part the new thread plays beside the others: coordinator, implementer, reviewer, or researcher. Set reviewer for review threads; a reviewer starts on Auto, or on Bypass where its engine has no Auto, and stays in Threads unless it needs the user's approval.\",\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},\"intent\":{\"description\":\"Part of the brief a coordinator must give: the user's own words for this piece of work.\",\"type\":\"string\",\"maxLength\":4000},\"doneWhen\":{\"description\":\"Part of the brief a coordinator must give: what finished looks like, checkably.\",\"type\":\"string\",\"maxLength\":4000},\"delivers\":{\"description\":\"Part of the brief a coordinator must give: pull-request, commit, or report (knowledge only, no code changes).\",\"type\":\"string\",\"enum\":[\"pull-request\",\"commit\",\"report\"]},\"computer\":{\"description\":\"A paired computer to run it on. It starts there once the user allows it. A thread whose coordinator is on another computer starts its threads on this one.\",\"type\":\"string\",\"maxLength\":256}},\"required\":[\"prompt\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "message_thread",
+   "description": "Send a message to another thread, on this computer or a paired one. A thread that is working reads it in the run already going, and an idle one starts a run on it. To learn where a thread stands, read it with read_thread instead.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The message to send.\"}},\"required\":[\"threadId\",\"text\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "set_thread_role",
+   "description": "Give a thread its part beside the others, or take it off. The role shows on the thread's row and in list_threads. A coordinator changes no files itself and delegates to threads it starts, and keeps its role until the user changes it; the other roles change nothing about what the thread may do.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"},\"role\":{\"anyOf\":[{\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},{\"type\":\"null\"}],\"description\":\"coordinator, implementer, reviewer, or researcher. null takes the role off.\"}},\"required\":[\"threadId\",\"role\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "archive_thread",
+   "description": "Archive a thread, which also cancels a run it still has going and retires its automation. Archived threads stay recoverable for five days. This throws away work in progress, so only archive when the user asked for it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "dismiss_thread",
+   "description": "Dismiss a thread, taking it out of Priority as the sidebar's Dismiss does. Use when the user asks to dismiss a thread, such as this one once its last step is done. Dismissing this thread while it runs takes effect when this turn finishes; a turn that fails still surfaces.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"description\":\"The thread's ID, an unambiguous prefix of it, or its exact title. Omit to dismiss this thread.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":256}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "move_to_worktree",
+   "description": "Move a thread into a new worktree, one the project already has, or back to the project checkout, as the thread menu's Move to worktree does. This is how a thread works in a worktree: use it whenever the user asks for one, never git worktree, so the app knows where the thread works. File changes already made stay in the old checkout. Moving this thread waits for this turn to end, and its next turn starts in the new checkout, on its own when you pass then. Another thread must not be running.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"description\":\"The thread to move: its ID, an unambiguous prefix of it, or its exact title. Omit or null to move this thread.\",\"anyOf\":[{\"type\":\"string\",\"maxLength\":256},{\"type\":\"null\"}]},\"worktreeId\":{\"anyOf\":[{\"type\":\"string\",\"maxLength\":256},{\"type\":\"null\"}],\"description\":\"\\\"new\\\" for a new worktree, the ID of one list_threads reports, or null for the project checkout.\"},\"then\":{\"anyOf\":[{\"type\":\"string\",\"maxLength\":1000000},{\"type\":\"null\"}],\"description\":\"When moving this thread, whatever else the user asked for along with the move, written as instructions to yourself. This thread's next turn starts in the new checkout on its own with it. null when the move is all the user asked for, or when moving another thread.\"}},\"required\":[\"worktreeId\",\"then\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "delete_worktree",
+   "description": "Delete a worktree the app made, by the id list_threads reports. Uncommitted work is committed first so it stays recoverable, then the folder is removed; git-ignored files are lost. Every thread in it moves back to the project checkout. Refused while any of those threads is running. Only delete when the user asked for it, such as cleaning up after coordinated work is done.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"worktreeId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The worktree's ID, as list_threads reports it.\"}},\"required\":[\"worktreeId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "stop_thread",
+   "description": "Stop the run a thread has going, leaving the thread itself alone. This throws away work in progress, so only stop a run when the user asked for it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threadId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The thread's known ID, an unambiguous prefix of it, or its exact title, on this computer or a paired one. Use list_threads only if you need to discover the target.\"}},\"required\":[\"threadId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "coordinationCoordinator": [
+  {
+   "name": "raise_decision",
+   "description": "Put a choice to the user that only they can make: one that changes scope, product behaviour, or anything destructive. It shows in the app at once; their answer arrives in this thread as a message. Offer the options you see with your recommendation, then end your turn if you cannot go on without the answer.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300,\"description\":\"The decision, as one question.\"},\"context\":{\"description\":\"What the user needs to know to decide, including the consequences either way.\",\"type\":\"string\",\"maxLength\":2000},\"options\":{\"maxItems\":5,\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"description\":{\"type\":\"string\",\"maxLength\":300},\"recommended\":{\"type\":\"boolean\"}},\"required\":[\"label\"]},\"description\":\"The choices, each with a short label of its own and what it means. Mark the one you recommend.\"}},\"required\":[\"question\",\"options\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "remember",
+   "description": "Save a note to your memory: something the user asked you to remember, or how they want you to work. You and every thread you start from now on read it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":500,\"description\":\"The note, in one or two sentences.\"}},\"required\":[\"text\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "forget",
+   "description": "Drop a note from your memory when the user asks you to forget it or it no longer holds.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"noteId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":200,\"description\":\"The note's ID, such as n3.\"}},\"required\":[\"noteId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "set_purpose",
+   "description": "Set what this coordinator is for, in the user's words, when they say what its purpose or goal is. Pass null to clear it.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"purpose\":{\"anyOf\":[{\"type\":\"string\",\"maxLength\":200},{\"type\":\"null\"}],\"description\":\"One line, or null to clear it.\"}},\"required\":[\"purpose\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "propose_threads",
+   "description": "Suggest threads for the user to start, rather than starting them. Each takes what start_thread takes, brief included, and must have a title. Nothing starts until the user starts it; you hear from each one they start once it ends a turn.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"threads\":{\"minItems\":1,\"maxItems\":12,\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1000000,\"description\":\"The first message of the new thread. It has none of this conversation's context, so say everything it needs.\"},\"title\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":120,\"description\":\"A few words naming what the thread does, which label the suggestion for the user and name the thread once it starts.\"},\"project\":{\"description\":\"Which project to start it in: its folder name, its path, or its id. Defaults to this thread's project, or on a paired computer the project there at the same path or with the same folder name.\",\"type\":\"string\",\"maxLength\":4096},\"worktree\":{\"description\":\"Run the new thread in its own new git worktree, detached at whatever the project has checked out, so its edits never touch this thread's checkout. Name files in its prompt relative to the project, never by this checkout's absolute path, which would send it back here.\",\"type\":\"boolean\"},\"worktreeId\":{\"description\":\"Start the thread in another worktree that already exists, as list_threads reports it, on the computer it starts on. Omit both worktree fields to share this thread's checkout. Takes precedence over worktree.\",\"type\":\"string\",\"maxLength\":256},\"model\":{\"description\":\"Model for the new thread: one of fable, opus, sonnet, haiku, gpt-6.2-astra (Astra), gpt-6.2-sol (Sol), gpt-6.1-terra (Terra), gpt-6-luna (Luna); an engine (claude, codex, opencode) for that engine's default model; or any other model in the app's model picker. Name a model by its id or by the name the picker shows; a name several providers offer resolves to the one the user pinned. Omit to run it on the model this coordinator's threads run on.\",\"type\":\"string\",\"maxLength\":256},\"engine\":{\"description\":\"The engine to run model on, needed only when more than one engine offers it.\",\"type\":\"string\",\"enum\":[\"claude\",\"codex\",\"opencode\"]},\"effort\":{\"description\":\"Effort for the new thread. Omit to run it at the effort this coordinator's threads run at, or the nearest one the selected model takes.\",\"type\":\"string\",\"enum\":[\"ultra\",\"max\",\"xhigh\",\"high\",\"medium\",\"low\"]},\"role\":{\"description\":\"The part the new thread plays beside the others: coordinator, implementer, reviewer, or researcher. Set reviewer for review threads; a reviewer starts on Auto, or on Bypass where its engine has no Auto, and stays in Threads unless it needs the user's approval.\",\"type\":\"string\",\"enum\":[\"coordinator\",\"implementer\",\"reviewer\",\"researcher\"]},\"intent\":{\"description\":\"Part of the brief a coordinator must give: the user's own words for this piece of work.\",\"type\":\"string\",\"maxLength\":4000},\"doneWhen\":{\"description\":\"Part of the brief a coordinator must give: what finished looks like, checkably.\",\"type\":\"string\",\"maxLength\":4000},\"delivers\":{\"description\":\"Part of the brief a coordinator must give: pull-request, commit, or report (knowledge only, no code changes).\",\"type\":\"string\",\"enum\":[\"pull-request\",\"commit\",\"report\"]},\"computer\":{\"description\":\"A paired computer to run it on. It starts there once the user allows it.\",\"type\":\"string\",\"maxLength\":256}},\"required\":[\"prompt\",\"title\"]},\"description\":\"The threads to suggest, one per piece of work.\"}},\"required\":[\"threads\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "coordinationMember": [
+  {
+   "name": "report_status",
+   "description": "Tell the coordinator this thread works under where your work stands. Call it before you end the turn in which you finish, get blocked, or fail: your closing message is not a report. The coordinator hears it when your turn ends. A done report names what you delivered: the pull request URL, the commits, or the report.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"state\":{\"type\":\"string\",\"enum\":[\"working\",\"blocked\",\"done\",\"failed\"],\"description\":\"working, blocked, done, or failed.\"},\"summary\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":500,\"description\":\"One or two sentences: the outcome, or what stops you.\"}},\"required\":[\"state\",\"summary\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "raise_decision",
+   "description": "Put a choice to the user that only they can make: one that changes scope, product behaviour, or anything destructive. It shows in the app at once; their answer arrives in this thread as a message. Offer the options you see with your recommendation, then end your turn if you cannot go on without the answer.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":300,\"description\":\"The decision, as one question.\"},\"context\":{\"description\":\"What the user needs to know to decide, including the consequences either way.\",\"type\":\"string\",\"maxLength\":2000},\"options\":{\"maxItems\":5,\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"description\":{\"type\":\"string\",\"maxLength\":300},\"recommended\":{\"type\":\"boolean\"}},\"required\":[\"label\"]},\"description\":\"The choices, each with a short label of its own and what it means. Mark the one you recommend.\"}},\"required\":[\"question\",\"options\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "automation": [
+  {
+   "name": "schedule",
+   "description": "Turn this task into a recurring automation that re-runs a prompt on a schedule. Use when the user asks to repeat, babysit, poll, or watch something on a cadence. The task keeps one automation, so calling this again replaces it. Runs never overlap: a tick that arrives while the previous run is still going is dropped.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"description\":\"The prompt to run on every tick. Write it to stand alone. A watch's stop condition goes in endsWhen, which every tick is told.\"},\"schedule\":{\"type\":\"string\",\"description\":\"A five-field cron expression in local time (\\\"0 8 * * *\\\" = 8AM daily, \\\"* * * * *\\\" = every minute), or an ISO 8601 timestamp for a single run. Seconds are not supported.\"},\"timezone\":{\"description\":\"IANA timezone such as \\\"America/Los_Angeles\\\". Defaults to the machine's local time.\",\"type\":\"string\"},\"policy\":{\"description\":\"Permission policy for scheduled runs. Defaults to this run's policy and cannot exceed it. Ask the user to change the task's permissions before scheduling work that needs stronger permissions.\",\"type\":\"string\",\"enum\":[\"confirm\",\"plan\",\"allow-edits\",\"autonomous\",\"bypass\"]},\"surfaceWhen\":{\"description\":\"One sentence naming when a tick of this schedule is worth the user's attention, such as \\\"an error in the logs was caused by the user's own code.\\\" Setting it makes the schedule quiet: a run that calls nothing_to_report settles without reaching anyone, and only one that calls notify surfaces. Leave it out and the schedule keeps whatever it surfaces for now, which for a new one is every run; pass an empty sentence to take the quiet off. A one-time run always surfaces, so it takes none.\",\"type\":\"string\",\"maxLength\":500},\"endsWhen\":{\"description\":\"One sentence naming what finishes this automation, such as \\\"the PR is approved.\\\" Set it when the automation watches something until it is done: its thread shows as running until a tick meets this and calls stop. Leave it out for a routine that repeats until someone stops it, such as a daily brief. Pass an empty sentence to make a watch a routine.\",\"type\":\"string\",\"maxLength\":500}},\"required\":[\"prompt\",\"schedule\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "status",
+   "description": "Read this task's automation: schedule, next run, how many times it has run, and its prompt.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "update",
+   "description": "Change this task's existing automation without recreating it. Pass only the fields that change. Pause instead of stopping when the user wants to keep the automation around.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"description\":\"The prompt to run on every tick. Write it to stand alone. A watch's stop condition goes in endsWhen, which every tick is told.\"},\"schedule\":{\"type\":\"string\",\"description\":\"A five-field cron expression in local time (\\\"0 8 * * *\\\" = 8AM daily, \\\"* * * * *\\\" = every minute), or an ISO 8601 timestamp for a single run. Seconds are not supported.\"},\"timezone\":{\"description\":\"IANA timezone for the schedule.\",\"type\":\"string\"},\"policy\":{\"description\":\"Permission policy for scheduled runs. Defaults to this run's policy and cannot exceed it. Ask the user to change the task's permissions before scheduling work that needs stronger permissions.\",\"type\":\"string\",\"enum\":[\"confirm\",\"plan\",\"allow-edits\",\"autonomous\",\"bypass\"]},\"surfaceWhen\":{\"description\":\"One sentence naming when a tick of this schedule is worth the user's attention, such as \\\"an error in the logs was caused by the user's own code.\\\" Setting it makes the schedule quiet: a run that calls nothing_to_report settles without reaching anyone, and only one that calls notify surfaces. Leave it out and the schedule keeps whatever it surfaces for now, which for a new one is every run; pass an empty sentence to take the quiet off. A one-time run always surfaces, so it takes none.\",\"type\":\"string\",\"maxLength\":500},\"endsWhen\":{\"description\":\"One sentence naming what finishes this automation, such as \\\"the PR is approved.\\\" Set it when the automation watches something until it is done: its thread shows as running until a tick meets this and calls stop. Leave it out for a routine that repeats until someone stops it, such as a daily brief. Pass an empty sentence to make a watch a routine.\",\"type\":\"string\",\"maxLength\":500},\"paused\":{\"description\":\"Pause or resume without discarding the automation.\",\"type\":\"boolean\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "stop",
+   "description": "Delete this task's automation so it stops firing. Call this from inside a scheduled run the moment its stop condition is met — nothing else ends an automation, so skipping this leaves it running forever.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "list_all",
+   "description": "List every automation across all tasks, not just this one.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "findings": [
+  {
+   "name": "notify",
+   "description": "Surface this scheduled run to the user, saying what you found. Call it the moment you find something, not at the end: a run that is stopped afterwards keeps what it already raised. Call it once per finding; they accumulate. Nothing later retracts it, and a quiet run that never calls it settles without reaching anyone.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"headline\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":200,\"description\":\"One line naming what you found. It is what the user reads in the sidebar, so write the finding itself rather than that you looked.\"},\"detail\":{\"description\":\"The finding in full, in plain text: it lands in the thread under the headline, as written.\",\"type\":\"string\",\"maxLength\":10000},\"key\":{\"description\":\"What this finding is about, worded the same way on every run, so the same one is not raised twice while the user has yet to read it.\",\"type\":\"string\",\"minLength\":1,\"maxLength\":200}},\"required\":[\"headline\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "nothing_to_report",
+   "description": "Say this run looked and found nothing worth surfacing, which is the only thing that lets a quiet scheduled run settle without disturbing the user. Say nothing at all and the run surfaces as an ordinary one, which is what a run that could not do its job should do.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"checked\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":200,\"description\":\"What you actually checked, in a few words. A run that could not check what it came for has something to report, not nothing.\"}},\"required\":[\"checked\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "browser": [
+  {
+   "name": "browser_open",
+   "description": "Open a page in the AICodingTool browser panel and read it back. The panel shares one browser session with the user, so any site they are signed into is already signed in here, and they watch the same tabs you drive: leave the pages they opened alone. A page the user has never visited is theirs to allow first, so say what you need and wait rather than retrying. To search, use browser_search.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":8192,\"description\":\"The page to open. Include the scheme for anything that is not an ordinary domain.\"},\"newTab\":{\"description\":\"Open another tab instead of reusing the one on screen.\",\"type\":\"boolean\"},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"waitSeconds\":{\"description\":\"How long to wait for the page to finish loading. Defaults to 20.\",\"type\":\"number\"}},\"required\":[\"url\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_search",
+   "description": "Search the web in the AICodingTool browser panel and read the results. Use this rather than opening a search engine yourself: Google sometimes answers the panel with its bot page instead of results.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"What to search for.\"},\"newTab\":{\"description\":\"Search in another tab instead of the one on screen.\",\"type\":\"boolean\"},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"waitSeconds\":{\"description\":\"How long to wait for the results to load. Defaults to 20.\",\"type\":\"number\"}},\"required\":[\"query\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_read",
+   "description": "Read the page a tab is showing: its text, and the elements you can act on. Act on the refs this hands back; they are only valid until the next read of that tab, so read again after anything changes the page.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"textLimit\":{\"description\":\"How many characters of page text to return. Defaults to 4000.\",\"type\":\"number\",\"minimum\":0},\"waitSeconds\":{\"description\":\"How long to wait for the page to settle first. Defaults to 20.\",\"type\":\"number\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_screenshot",
+   "description": "Take a picture of a tab and read back where it was saved. Use it to check how a page looks, which the page text cannot tell you. The picture is a PNG file on this machine, so open that file to see it. The tab does not have to be the one on screen: a page the panel is not showing is captured just the same, and the user sees nothing move.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"fullPage\":{\"description\":\"Capture the whole page instead of only the part that fits the window.\",\"type\":\"boolean\"},\"waitSeconds\":{\"description\":\"How long to wait for the page to settle first. Defaults to 20.\",\"type\":\"number\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_console",
+   "description": "Read recent console messages from a tab, including runtime errors and rejected promises Chromium reports there. Each answer includes a cursor; pass it as since next time to read only newer messages.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"since\":{\"description\":\"Return messages after this console cursor.\",\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740991},\"limit\":{\"description\":\"Maximum messages to return. Defaults to 50.\",\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"minimumLevel\":{\"description\":\"Lowest severity to return. Defaults to debug.\",\"type\":\"string\",\"enum\":[\"debug\",\"info\",\"warning\",\"error\"]}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_network",
+   "description": "Read recent completed requests from a tab with method, status or error, resource type, cache use, and duration. Each answer includes a cursor; pass it as since next time to read only newer requests.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"since\":{\"description\":\"Return requests after this network cursor.\",\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740991},\"limit\":{\"description\":\"Maximum requests to return. Defaults to 50.\",\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"failuresOnly\":{\"description\":\"Return only errors and responses with status 400 or higher.\",\"type\":\"boolean\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_wait",
+   "description": "Wait until page text, an element name, or the URL contains a value; until text or an element disappears; or until network activity has stopped for 500ms. Reads the page after a successful wait.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"condition\":{\"type\":\"string\",\"enum\":[\"text\",\"text-gone\",\"element\",\"element-gone\",\"url\",\"network-idle\"]},\"value\":{\"description\":\"Text to find. Omit only for network-idle.\",\"type\":\"string\",\"maxLength\":1000},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"timeoutSeconds\":{\"description\":\"How long to wait. Defaults to 20.\",\"type\":\"number\"}},\"required\":[\"condition\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_click",
+   "description": "Click an element in the page and read back what it became.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The ref of the element, from the latest snapshot of that tab.\"},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"waitSeconds\":{\"description\":\"How long to wait for the click's page load. Defaults to 20.\",\"type\":\"number\"}},\"required\":[\"ref\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_type",
+   "description": "Type into a field in the page, optionally submitting it, then read back what it became.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The ref of the element, from the latest snapshot of that tab.\"},\"text\":{\"type\":\"string\",\"maxLength\":1000000,\"description\":\"What the field should contain. This replaces whatever it holds.\"},\"submit\":{\"description\":\"Submit the field's form afterwards, the way pressing Enter would.\",\"type\":\"boolean\"},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"waitSeconds\":{\"description\":\"How long to wait for a page load the submit causes. Defaults to 20.\",\"type\":\"number\"}},\"required\":[\"ref\",\"text\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_back",
+   "description": "Go back, or forward, in a tab's own history and read the page it lands on.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"forward\":{\"description\":\"Go forward instead of back.\",\"type\":\"boolean\"},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_tabs",
+   "description": "List the pages the browser panel has open. Use it to find the tab id of a page the user is looking at.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_close_tab",
+   "description": "Close a tab in the browser panel. Only close tabs you opened; the user's own pages are theirs.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"The tab to close, as browser_tabs reports it.\"}},\"required\":[\"tabId\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "simulator": [
+  {
+   "name": "simulator_open",
+   "description": "Start an iOS simulator in the AICodingTool Simulator panel and wait until it is running. It runs headless, so the user keeps using their computer while you test. Answers with the device's UDID: build for it with `xcodebuild -destination 'id=<UDID>'`, then `xcrun simctl install <UDID> <path.app>` and `xcrun simctl launch <UDID> <bundle id>`.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"device\":{\"description\":\"A device name such as \\\"iPhone 17 Pro\\\", or a UDID. Defaults to the device the panel already shows, else one that is running, else the newest iPhone.\",\"type\":\"string\",\"maxLength\":200}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "simulator_read",
+   "description": "Read the simulator's screen: the app on screen as accessibility elements, each with a ref, its role, label, value and frame in points, plus a screenshot file. Refs are only valid until the next read of the screen.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"screenshot\":{\"description\":\"Also save a screenshot to look at. Defaults to true.\",\"type\":\"boolean\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "simulator_tap",
+   "description": "Tap the simulator's screen, on an element by the ref the latest simulator_read gave it, or at a point. Answers with the elements on screen afterwards.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"ref\":{\"description\":\"The element's ref from the latest simulator_read.\",\"type\":\"string\",\"maxLength\":64},\"x\":{\"type\":\"number\",\"minimum\":0,\"maximum\":10000,\"description\":\"Horizontal position in points from the screen's top left, as simulator_read measures it.\"},\"y\":{\"type\":\"number\",\"minimum\":0,\"maximum\":10000,\"description\":\"Vertical position in points from the screen's top left, as simulator_read measures it.\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "simulator_swipe",
+   "description": "Drag a finger across the simulator's screen from one point to another, to scroll, swipe between pages, or pull down. Answers with the elements on screen afterwards.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\",\"minimum\":0,\"maximum\":10000,\"description\":\"Starting horizontal position in points from the screen's top left, as simulator_read measures it.\"},\"y\":{\"type\":\"number\",\"minimum\":0,\"maximum\":10000,\"description\":\"Starting vertical position in points from the screen's top left, as simulator_read measures it.\"},\"toX\":{\"type\":\"number\",\"minimum\":0,\"maximum\":10000,\"description\":\"Ending horizontal position in points from the screen's top left, as simulator_read measures it.\"},\"toY\":{\"type\":\"number\",\"minimum\":0,\"maximum\":10000,\"description\":\"Ending vertical position in points from the screen's top left, as simulator_read measures it.\"},\"durationMs\":{\"description\":\"How long the drag takes. Defaults to 300; shorter flings further.\",\"type\":\"number\",\"minimum\":50,\"maximum\":5000}},\"required\":[\"x\",\"y\",\"toX\",\"toY\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "simulator_type",
+   "description": "Type text into whatever field has the keyboard in the simulator; tap the field first. Characters a US keyboard lacks, such as emoji or accents, are pasted through the device's pasteboard. Answers with the elements on screen afterwards.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1999,\"description\":\"The text to type.\"},\"submit\":{\"description\":\"Press Return afterwards.\",\"type\":\"boolean\"}},\"required\":[\"text\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "simulator_button",
+   "description": "Press a hardware button on the simulator: home goes to the home screen, lock locks or wakes it. Answers with the elements on screen afterwards.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"button\":{\"type\":\"string\",\"enum\":[\"home\",\"lock\"]}},\"required\":[\"button\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "simulator_rotate",
+   "description": "Turn the simulator to portrait or landscape, to check how the app lays out each way. Answers with the elements on screen afterwards, measured the way the app now draws them.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"orientation\":{\"type\":\"string\",\"enum\":[\"portrait\",\"landscape-left\",\"landscape-right\",\"portrait-upside-down\"],\"description\":\"How to hold the device. landscape-left has the top of the screen on the left.\"}},\"required\":[\"orientation\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "terminal": [
+  {
+   "name": "terminal_list",
+   "description": "List the terminals the AICodingTool terminal panel has open, with the folder each runs in and whether its shell is still alive.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "terminal_read",
+   "description": "Read what a terminal in the AICodingTool terminal panel has printed, as plain text with the escape sequences resolved. This is the user's own shell, not yours: you can read it but never type into it, so use Bash to run anything yourself. Prefer `match` over a large `lines` when hunting for an error — it filters before the output is returned.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"terminalId\":{\"description\":\"Which terminal to read. Defaults to the one this thread opened, else the one on screen.\",\"type\":\"string\",\"maxLength\":256},\"lines\":{\"description\":\"How many of the newest lines to return. Defaults to 100, and never exceeds 2000.\",\"type\":\"number\",\"minimum\":0},\"match\":{\"description\":\"Keep only lines containing this text, case-insensitively.\",\"type\":\"string\",\"maxLength\":1000}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "automationCoordinator": [
+  {
+   "name": "status",
+   "description": "Read this task's automation: schedule, next run, how many times it has run, and its prompt.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "list_all",
+   "description": "List every automation across all tasks, not just this one.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "browserReadOnly": [
+  {
+   "name": "browser_read",
+   "description": "Read the page a tab is showing: its text, and the elements you can act on. Act on the refs this hands back; they are only valid until the next read of that tab, so read again after anything changes the page.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"textLimit\":{\"description\":\"How many characters of page text to return. Defaults to 4000.\",\"type\":\"number\",\"minimum\":0},\"waitSeconds\":{\"description\":\"How long to wait for the page to settle first. Defaults to 20.\",\"type\":\"number\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_screenshot",
+   "description": "Take a picture of a tab and read back where it was saved. Use it to check how a page looks, which the page text cannot tell you. The picture is a PNG file on this machine, so open that file to see it. The tab does not have to be the one on screen: a page the panel is not showing is captured just the same, and the user sees nothing move.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"fullPage\":{\"description\":\"Capture the whole page instead of only the part that fits the window.\",\"type\":\"boolean\"},\"waitSeconds\":{\"description\":\"How long to wait for the page to settle first. Defaults to 20.\",\"type\":\"number\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_console",
+   "description": "Read recent console messages from a tab, including runtime errors and rejected promises Chromium reports there. Each answer includes a cursor; pass it as since next time to read only newer messages.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"since\":{\"description\":\"Return messages after this console cursor.\",\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740991},\"limit\":{\"description\":\"Maximum messages to return. Defaults to 50.\",\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"minimumLevel\":{\"description\":\"Lowest severity to return. Defaults to debug.\",\"type\":\"string\",\"enum\":[\"debug\",\"info\",\"warning\",\"error\"]}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_network",
+   "description": "Read recent completed requests from a tab with method, status or error, resource type, cache use, and duration. Each answer includes a cursor; pass it as since next time to read only newer requests.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"since\":{\"description\":\"Return requests after this network cursor.\",\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740991},\"limit\":{\"description\":\"Maximum requests to return. Defaults to 50.\",\"type\":\"integer\",\"minimum\":1,\"maximum\":200},\"failuresOnly\":{\"description\":\"Return only errors and responses with status 400 or higher.\",\"type\":\"boolean\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_wait",
+   "description": "Wait until page text, an element name, or the URL contains a value; until text or an element disappears; or until network activity has stopped for 500ms. Reads the page after a successful wait.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"condition\":{\"type\":\"string\",\"enum\":[\"text\",\"text-gone\",\"element\",\"element-gone\",\"url\",\"network-idle\"]},\"value\":{\"description\":\"Text to find. Omit only for network-idle.\",\"type\":\"string\",\"maxLength\":1000},\"tabId\":{\"description\":\"Which tab to act in. Defaults to the one the panel is showing.\",\"type\":\"string\",\"maxLength\":256},\"timeoutSeconds\":{\"description\":\"How long to wait. Defaults to 20.\",\"type\":\"number\"}},\"required\":[\"condition\"],\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "browser_tabs",
+   "description": "List the pages the browser panel has open. Use it to find the tab id of a page the user is looking at.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "simulatorReadOnly": [
+  {
+   "name": "simulator_read",
+   "description": "Read the simulator's screen: the app on screen as accessibility elements, each with a ref, its role, label, value and frame in points, plus a screenshot file. Refs are only valid until the next read of the screen.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{\"screenshot\":{\"description\":\"Also save a screenshot to look at. Defaults to true.\",\"type\":\"boolean\"}},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ],
+ "computerUseSetup": [
+  {
+   "name": "request_setup",
+   "description": "Use when a task requires operating another application's interface but computer use needs to be enabled in AICodingTool. Call this rather than telling the user to install or configure anything.",
+   "inputSchema": "{\"type\":\"object\",\"properties\":{},\"$schema\":\"http://json-schema.org/draft-07/schema#\"}",
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ]
+}

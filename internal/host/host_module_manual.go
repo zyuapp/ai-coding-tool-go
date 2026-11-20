@@ -18,7 +18,7 @@ type EffectHandlers map[string]EffectHandler
 // listens to and reads on the way up.
 type HostModule struct {
 	Effects EffectHandlers
-	// Subscribe starts listening, answering how to stop. Modules start in the order they are
-	// listed, and stop in it too. Nil when the module listens to nothing.
-	Subscribe func(host RuntimeSubscriptionHost, runs RunReports) func()
+	// Subscribe starts listening, answering how to stop (nil for nothing to stop). Modules start in
+	// the order they are listed, and stop in it too. Nil when the module listens to nothing.
+	Subscribe func(host SubscriptionHost, runs RunReports) func()
 }
