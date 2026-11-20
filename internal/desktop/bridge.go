@@ -302,5 +302,12 @@ func (bridge *Bridge) TitlebarDoubleClick() { bridge.app.nativeTitlebarDoubleCli
 // PasteboardFiles lists the paths of the files on the clipboard, for pathForFile on a paste.
 func (bridge *Bridge) PasteboardFiles() []string { return pasteboardFiles() }
 
+// PasteboardImage is the clipboard's image as base64 PNG, for a web view that pastes none (WebKitGTK).
+func (bridge *Bridge) PasteboardImage() string { return pasteboardImage() }
+
 // LocalFonts lists the font families installed on this machine, for the font picker.
 func (bridge *Bridge) LocalFonts() []string { return localFontFamilies() }
+
+// MenuShortcut runs the menu item a shortcut names, for a window that keeps its menu's shortcuts
+// without the menu (Linux). The page sends only the keys it left unhandled.
+func (bridge *Bridge) MenuShortcut(item string) { bridge.app.menuShortcut(item) }

@@ -246,8 +246,10 @@ void actToggleInspector(void) {
     @try {
       [webView.configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
       _WKInspector *inspector = [webView _inspector];
-      if ([inspector isVisible]) [inspector close];
-      else [inspector show];
+      if ([inspector isVisible]) {
+        [inspector close];
+        [[webView window] makeFirstResponder:webView];
+      } else [inspector show];
     } @catch (NSException *exception) {
       NSLog(@"Could not toggle the inspector: %@", exception.reason);
     }
@@ -326,9 +328,20 @@ static BOOL shouldClose(id self, SEL _cmd, NSWindow *sender) {
    terminal does, drops the rest; each character goes in a key event of its own, as Chromium has it. */
 static id typedTextMonitor = nil;
 
+/* Closing an attached Web Inspector removes the view that held the keyboard and leaves it with the
+   window itself, where keys reach nothing; the page takes it back, as Chromium's does. */
+static void reclaimKeyboard(NSWindow *window) {
+  if (!window || window != mainWindow()) return;
+  NSResponder *responder = [window firstResponder];
+  if ([responder isKindOfClass:[NSView class]] && [(NSView *)responder window] == window) return;
+  WKWebView *webView = findWebView([window contentView]);
+  if (webView) [window makeFirstResponder:webView];
+}
+
 static NSEvent *splitTypedText(NSEvent *event) {
   NSString *characters = event.characters;
   NSWindow *window = event.window;
+  reclaimKeyboard(window);
   NSEventModifierFlags held = NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption;
   if (!window || characters.length < 2 || (event.modifierFlags & held) != 0) return event;
   if ([characters rangeOfComposedCharacterSequenceAtIndex:0].length == characters.length) return event;

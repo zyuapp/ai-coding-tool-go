@@ -5,8 +5,14 @@
  */
 body { will-change: opacity; }
 /**
- * WebKit leaves a settings page centred for the width it had before its scrollbar appeared, so a
- * page that grows sits off centre from the parts drawn after. The page keeps its scrollbar's room
- * from the start instead.
+ * WebKit lays out what a scroll box holds as if its scrollbar took no room when the box sits in an
+ * out-of-flow grid, inside a flex container, whose width comes from its insets alone. A width of its
+ * own avoids that, so the settings page centres and right-aligns within its scrollbar as in Chromium.
  */
-:root .settings-main { overflow-y: scroll; }
+.settings-view { width: 100vw; }
+/**
+ * A grid that scrolls within a column flex box under a max-height: WebKit sizes its auto rows to fit
+ * that height, shrinking tiles that clip their content to slivers, where Chromium keeps each row its
+ * content's height and scrolls.
+ */
+.theme-select-popover .theme-choices { grid-auto-rows: max-content; }

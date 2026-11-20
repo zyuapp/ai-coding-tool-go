@@ -206,7 +206,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FEED: ${{ matrix.feed }}
-        run: gh release upload "$TAG" release/*.tar.gz release/*.AppImage "release/$FEED" --clobber
+        run: gh release upload "$TAG" release/*.tar.gz release/*.deb release/*.AppImage "release/$FEED" --clobber
 
   publish:
     needs:

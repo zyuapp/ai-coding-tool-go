@@ -24,9 +24,9 @@ func arg[T any](args []jsontext.Value, index int) (T, error) {
 	return value, err
 }
 
-// optional reads an argument the window may leave undefined, as nil.
+// optional reads an argument the window may leave undefined or null, as nil.
 func optionalArg[T any](args []jsontext.Value, index int) (*T, error) {
-	if index >= len(args) || args[index] == nil {
+	if index >= len(args) || args[index] == nil || args[index].Kind() == 'n' {
 		return nil, nil
 	}
 	value, err := arg[T](args, index)
@@ -42,8 +42,12 @@ func answer(value any, err error) (jsontext.Value, error) {
 
 func settled(err error) (jsontext.Value, error) { return nil, err }
 
-// Call answers every window call the window desktop does not answer itself (window-desktop.ts).
+// Call answers every window call the window desktop does not answer itself (window-desktop.ts). A
+// frame call finishes before the window's next call starts, so the last place the panel reported wins.
 func (c *Controller) Call(ctx context.Context, name string, args []jsontext.Value) Reply {
+	if frameCalls[name] {
+		return Settled(c.call(ctx, name, args))
+	}
 	return Async(func() (jsontext.Value, error) { return c.call(ctx, name, args) })
 }
 

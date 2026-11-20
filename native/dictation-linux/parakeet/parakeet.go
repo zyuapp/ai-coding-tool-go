@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package parakeet runs Parakeet TDT through ONNX Runtime, from the ONNX export onnx-asr reads: a
 // preprocessor turns sound into mel features, the encoder turns those into frames, and a joint
 // decoder walks the frames, choosing a token and how many frames to skip at each step.

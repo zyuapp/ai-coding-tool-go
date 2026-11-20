@@ -313,9 +313,9 @@ func TestShellThatCannotStartExitsWithCodeOne(t *testing.T) {
 func TestClosingKillsTheShellAndPublishesNothingMore(t *testing.T) {
 	host, sink := newTestHost(t, "/bin/sh", "-l")
 	host.Start("kill", t.TempDir())
-	host.Write("kill", "echo $$\r")
+	host.Write("kill", "echo pid=$$\r")
 	read := until(t, "the shell never printed its pid", func() (string, bool) {
-		match := regexp.MustCompile(`(?m)^(\d+)$`).FindStringSubmatch(joined(host.Read("kill", 100, "")))
+		match := regexp.MustCompile(`pid=(\d+)`).FindStringSubmatch(joined(host.Read("kill", 100, "")))
 		if match == nil {
 			return "", false
 		}

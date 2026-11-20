@@ -132,6 +132,8 @@ func (app *App) nativePlaceAndShow(placement WindowPlacement) {
 	C.actPlaceAndShow(C.double(x), C.double(y), C.double(placement.Width), C.double(placement.Height), cBool(hasPosition), cBool(maximized), cBool(fullScreen))
 }
 
+func (app *App) nativePageReady() {}
+
 func (app *App) nativeReveal()               { C.actReveal() }
 func (app *App) nativeToggleFullScreen()     { C.actToggleFullScreen() }
 func (app *App) nativeMinimize()             { C.actMinimize() }
@@ -170,6 +172,9 @@ func localFontFamilies() []string {
 	defer C.free(unsafe.Pointer(list))
 	return strings.Split(C.GoString(list), "\n")
 }
+
+// pasteboardImage is never needed: WKWebView pastes an image as a file itself.
+func pasteboardImage() string { return "" }
 
 func pasteboardFiles() []string {
 	list := C.actPasteboardFiles()

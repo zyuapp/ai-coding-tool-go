@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Usage: scripts/package-linux.sh [out-dir]
-# Builds AICodingTool-<version>-<arch>.tar.gz and .AppImage for this machine's architecture into
+# Builds AICodingTool-<version>-<arch>.tar.gz, .deb and .AppImage for this machine's architecture into
 # out-dir (default build/package). Runs on Linux with GTK 3 and WebKitGTK 4.1 development files; the
-# AppImage needs appimagetool on PATH. Set SKIP_FRONTEND=1 to reuse frontend/dist.
+# .deb needs dpkg-deb and the AppImage appimagetool on PATH. Set SKIP_FRONTEND=1 to reuse frontend/dist.
+# scripts/linux-docker.sh package runs it in a container with all of these.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-$root/build/package}
@@ -12,8 +13,8 @@ url_scheme=aicodingtool
 executable=aicodingtool
 [[ $(uname -s) == Linux ]] || { echo "package-linux.sh builds on Linux only." >&2; exit 1; }
 case "$(uname -m)" in
-  x86_64 | amd64) arch=x86_64 artifact_arch=x86_64 ;;
-  aarch64 | arm64) arch=aarch64 artifact_arch=arm64 ;;
+  x86_64 | amd64) arch=x86_64 artifact_arch=x86_64 deb_arch=amd64 ;;
+  aarch64 | arm64) arch=aarch64 artifact_arch=arm64 deb_arch=arm64 ;;
   *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 version=$(sed -n 's/^ *"productVersion": "\(.*\)",*$/\1/p' "$root/wails.json" | head -1)
@@ -51,19 +52,48 @@ cp "$root/assets/icon.png" "$appdir/usr/share/icons/hicolor/512x512/apps/$app_id
 cat > "$appdir/usr/share/applications/$app_id.desktop" <<DESKTOP
 [Desktop Entry]
 Name=$app_name
-Comment=Work with coding agents side by side.
+Comment=A fast local desktop client for Claude and Codex coding tasks.
 Exec=$executable %U
 Terminal=false
 Type=Application
 Icon=$app_id
 Categories=Development;
-StartupWMClass=$executable
+StartupWMClass=$app_id
 MimeType=x-scheme-handler/$url_scheme;
 DESKTOP
 
 mkdir -p "$out"
 echo "Writing $out/$name.tar.gz…"
 tar -C "$appdir/usr" -czf "$out/$name.tar.gz" --transform "s,^\.,$name," .
+
+# The Electron app's package name and folder, so installing this one replaces it in place.
+if command -v dpkg-deb >/dev/null 2>&1; then
+  deb=$work/deb
+  install_dir="/opt/$app_name"
+  mkdir -p "$deb$install_dir" "$deb/usr/bin" "$deb/DEBIAN"
+  cp -R "$appdir/usr/." "$deb$install_dir/"
+  ln -s "$install_dir/bin/$executable" "$deb/usr/bin/$executable"
+  mkdir -p "$deb/usr/share"
+  cp -R "$appdir/usr/share/applications" "$appdir/usr/share/icons" "$deb/usr/share/"
+  cat > "$deb/DEBIAN/control" <<CONTROL
+Package: ai-coding-tool
+Version: $version
+Section: devel
+Priority: optional
+Architecture: $deb_arch
+Maintainer: Zhuocheng Yu <zhuocheng.yu.d@gmail.com>
+Installed-Size: $(du -sk "$deb" | cut -f1)
+Depends: libgtk-3-0, libwebkit2gtk-4.1-0, ca-certificates, xdg-utils, x11-utils, libsecret-tools
+Recommends: pulseaudio-utils | alsa-utils, xdotool
+Homepage: https://github.com/zyuapp/ai-coding-tool-go
+Description: $app_name
+ A fast local desktop client for Claude and Codex coding tasks.
+CONTROL
+  echo "Writing $out/$name.deb…"
+  dpkg-deb --build --root-owner-group "$deb" "$out/$name.deb"
+else
+  echo "dpkg-deb is not on PATH; skipped the .deb."
+fi
 
 if command -v appimagetool >/dev/null 2>&1; then
   ln -s "usr/bin/$executable" "$appdir/AppRun"
@@ -75,4 +105,4 @@ if command -v appimagetool >/dev/null 2>&1; then
 else
   echo "appimagetool is not on PATH; skipped the AppImage."
 fi
-echo "Built $out/$name.tar.gz"
+echo "Built $name in $out"

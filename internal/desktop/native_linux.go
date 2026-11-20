@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -42,10 +43,47 @@ func nativeGlassAvailable() bool { return false }
 
 func nativeReducedTransparency() bool { return false }
 
-func (app *App) nativeInstall(material WindowMaterial) {}
-func (app *App) nativeGlassTint() float64              { return 0 }
+func (app *App) nativeInstall(material WindowMaterial) {
+	if woke := app.options.OnWake; woke != nil {
+		platform.WatchWake(woke)
+	}
+}
+
+func (app *App) nativeGlassTint() float64 { return 0 }
+
+// firstShow holds the window's placement until its page is ready: Wails queues the hide of a
+// StartHidden window on the main loop as the window opens, which would undo a show made in OnStartup.
+var firstShow struct {
+	sync.Mutex
+	placement *WindowPlacement
+	ready     bool
+}
 
 func (app *App) nativePlaceAndShow(placement WindowPlacement) {
+	firstShow.Lock()
+	firstShow.placement = &placement
+	ready := firstShow.ready
+	firstShow.Unlock()
+	if ready {
+		app.showPlaced()
+	}
+}
+
+func (app *App) nativePageReady() {
+	firstShow.Lock()
+	firstShow.ready = true
+	firstShow.Unlock()
+	app.showPlaced()
+}
+
+func (app *App) showPlaced() {
+	firstShow.Lock()
+	placement := firstShow.placement
+	firstShow.placement = nil
+	firstShow.Unlock()
+	if placement == nil {
+		return
+	}
 	runtime.WindowSetSize(app.ctx, int(placement.Width), int(placement.Height))
 	runtime.WindowShow(app.ctx)
 	if placement.FullScreen != nil && *placement.FullScreen {
@@ -75,9 +113,6 @@ func (app *App) nativeAbout()                    {}
 func (app *App) nativeHideOthers()               {}
 func (app *App) nativeShowAll()                  {}
 func (app *App) nativeHideApp()                  { runtime.WindowHide(app.ctx) }
-func (app *App) nativeZoomPage(step int)         {}
-func (app *App) nativeFocusPage()                {}
-func (app *App) nativeToggleInspector()          {}
 func (app *App) nativeSetDockUnread(unread bool) {}
 func (app *App) nativeSetAppearance(mode int)    {}
 func (app *App) nativeSetBadge(count int)        {}
@@ -95,8 +130,6 @@ func (app *App) nativeOpenLicenses(files licenseDocuments) error {
 }
 
 func (app *App) nativeCloseLicenses() bool { return false }
-
-func pasteboardFiles() []string { return []string{} }
 
 func localFontFamilies() []string {
 	output, err := exec.Command("fc-list", ":", "family").Output()

@@ -19,6 +19,8 @@ type GoBridge = {
   TitlebarDoubleClick(): Promise<void>;
   LocalFonts(): Promise<string[]>;
   PasteboardFiles(): Promise<string[]>;
+  PasteboardImage(): Promise<string>;
+  MenuShortcut(item: string): Promise<void>;
 };
 type DesktopIdentity = { platform?: DesktopPlatform; windowMaterial?: WindowMaterial; reducedTransparency?: boolean };
 
@@ -158,25 +160,46 @@ window.addEventListener("drop", (event) => {
   });
 }, true);
 
-/** A pasted file has no path either; the clipboard's file paths are read and the paste delivered again with them. */
+/** Hands the page a paste again, carrying files the first one lacked. */
+function repaste(target: EventTarget, files: File[]) {
+  if (files.length === 0) return;
+  const transfer = new DataTransfer();
+  for (const file of files) transfer.items.add(file);
+  const again = new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: transfer });
+  redelivered.add(again);
+  target.dispatchEvent(again);
+}
+
+/**
+ * A pasted file has no path either; the clipboard's file paths are read and the paste delivered again
+ * with them. WebKitGTK gives a paste no files at all: a file manager's copy arrives as a URI list, made
+ * into files from its paths, and an image not at all, so main reads it. WebKitGTK lists no types for
+ * text either, so that paste goes ahead as well.
+ */
 window.addEventListener("paste", (event) => {
   if (redelivered.has(event) || !event.clipboardData) return;
   const files = Array.from(event.clipboardData.files);
-  if (files.length === 0) return;
+  const types = event.clipboardData.types;
+  const target = event.target ?? window;
+  const gtk = files.length === 0 && platform === "linux";
+  if (gtk && types.length === 0) {
+    void go().PasteboardImage().catch(() => "").then((png) => {
+      if (png) repaste(target, [new File([base64Bytes(png)], "image.png", { type: "image/png" })]);
+    });
+    return;
+  }
+  const listed = gtk && types.includes("text/uri-list") && !types.includes("text/plain");
+  if (files.length === 0 && !listed) return;
   event.preventDefault();
   event.stopImmediatePropagation();
-  const target = event.target ?? window;
   void go().PasteboardFiles().catch(() => []).then((paths) => {
+    const named = listed ? paths.map((path) => new File([], baseName(path))) : files;
     const remaining = [...paths];
-    for (const file of files) {
+    for (const file of named) {
       const index = remaining.findIndex((path) => baseName(path) === file.name);
       if (index >= 0) droppedPaths.set(file, remaining.splice(index, 1)[0]);
     }
-    const transfer = new DataTransfer();
-    for (const file of files) transfer.items.add(file);
-    const again = new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: transfer });
-    redelivered.add(again);
-    target.dispatchEvent(again);
+    repaste(target, named);
   });
 }, true);
 
@@ -317,6 +340,26 @@ window.addEventListener("keydown", (event) => {
   later("window:shortcut", { action: binding.action, surface: "any" } satisfies ShortcutInvocation);
   takeKey(event);
 }, true);
+
+/**
+ * Linux hides the menu strip but keeps the shortcuts of Electron's default menu. Like Chromium's,
+ * they act only on a keystroke the page left unhandled.
+ */
+const MENU_SHORTCUTS: Record<string, string> = {
+  "ctrl+q": "quit", "ctrl+w": "close", "ctrl+m": "minimize",
+  "ctrl+r": "reload", "ctrl+shift+r": "forceReload", "ctrl+shift+i": "toggleDevTools",
+  "ctrl+0": "resetZoom", "ctrl+=": "zoomIn", "ctrl++": "zoomIn", "ctrl+shift++": "zoomIn", "ctrl+-": "zoomOut",
+  f11: "togglefullscreen",
+};
+if (!mac) {
+  window.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.isComposing || event.altKey || event.metaKey) return;
+    const item = MENU_SHORTCUTS[`${event.ctrlKey ? "ctrl+" : ""}${event.shiftKey ? "shift+" : ""}${event.key.toLowerCase()}`];
+    if (!item) return;
+    event.preventDefault();
+    void go().MenuShortcut(item).catch(() => undefined);
+  });
+}
 
 /** A link the window follows outward only ever names a web page; the page itself never leaves. */
 function openOutside(url: string) {

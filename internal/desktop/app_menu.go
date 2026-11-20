@@ -76,3 +76,30 @@ func (app *App) SetUpdateChecking(checking bool) {
 	item.Disabled = checking
 	runtime.MenuUpdateApplicationMenu(app.context())
 }
+
+// menuShortcut does what Electron's default menu item of that role does.
+func (app *App) menuShortcut(item string) {
+	ctx := app.context()
+	switch item {
+	case "quit":
+		runtime.Quit(ctx)
+	case "close":
+		app.closeWindow()
+	case "minimize":
+		app.nativeMinimize()
+	case "reload":
+		runtime.WindowReload(ctx)
+	case "forceReload":
+		runtime.WindowReloadApp(ctx)
+	case "toggleDevTools":
+		app.nativeToggleInspector()
+	case "resetZoom":
+		app.nativeZoomPage(0)
+	case "zoomIn":
+		app.nativeZoomPage(1)
+	case "zoomOut":
+		app.nativeZoomPage(-1)
+	case "togglefullscreen":
+		app.nativeToggleFullScreen()
+	}
+}

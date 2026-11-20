@@ -82,7 +82,8 @@ A source build keeps its own profile (`AI Coding Tool Go Dev` under the user con
 ## Building and checks
 - `wails dev` runs the app with the Vite dev server; `wails build` writes `build/bin`. `scripts/run.sh` builds and runs a dev app with `ACT_PROFILE_DIR` / `ACT_WINDOW_SIZE=WxH`.
 - `scripts/prepare-cua-driver.sh` fetches the pinned Cua Driver into `build/cua-driver`, where a source build runs computer use from.
-- Releases: `scripts/package-mac.sh` / `scripts/package-linux.sh` build the installed app (production identity, helpers, driver, notices), `scripts/release-feed.sh` writes the `latest-*.yml` feed `internal/updates` reads, and `.github/workflows/release.yml` publishes them to `zyuapp/ai-coding-tool-go` releases.
+- `scripts/linux-docker.sh` builds, tests (`go test -tags webkit2_41`), runs under Xvfb and packages the Linux app in an Ubuntu container, and installs the `.deb` in a clean one.
+- Releases: `scripts/package-mac.sh` / `scripts/package-linux.sh` build the installed app (production identity, helpers, driver, notices; `.deb`, AppImage and tarball on Linux), `scripts/release-feed.sh` writes the `latest-*.yml` feed `internal/updates` reads, and `.github/workflows/release.yml` publishes them to `zyuapp/ai-coding-tool-go` releases.
 - `go test ./...`; `cd frontend && npm run check` for the renderer.
 - Differential checks against the TypeScript backend. They run a CommonJS build of it named by `TS_DIST` (default `/tmp/goport/tsdist`); the head of `scripts/reducer-diff/run.sh` has the command that builds one. Rebuild it after pulling upstream changes.
   - `scripts/reducer-diff/run.sh [--seeds 1-50 --steps 400 --cover]` fuzzes `application.Reduce` and the host's projections (`cmd/reduce-lines`) against the TypeScript reducer with the same random inputs, and writes the inputs of the first divergence per seed to `$TRAILS/trail-<seed>.jsonl` (`replay.cjs` replays one).

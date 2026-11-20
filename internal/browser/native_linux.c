@@ -394,6 +394,17 @@ typedef struct {
   char *failure;
 } StartWork;
 
+#define FRAME_KEY "aicodingtool-frame"
+
+/* Gives a shown page exactly the frame it was placed at: a size request is only a minimum, and the
+   overlay would otherwise give the page its natural size. */
+static gboolean onChildPosition(GtkOverlay *overlay, GtkWidget *widget, GdkRectangle *allocation, gpointer unused) {
+  GdkRectangle *frame = g_object_get_data(G_OBJECT(widget), FRAME_KEY);
+  if (!frame) return FALSE;
+  *allocation = *frame;
+  return TRUE;
+}
+
 /* Puts an overlay where the app's own page is, so pages can be placed over it. */
 static void startOnMain(void *data) {
   StartWork *work = data;
@@ -414,6 +425,7 @@ static void startOnMain(void *data) {
     GtkWidget *app = GTK_WIDGET(hostView);
     GtkWidget *box = gtk_widget_get_parent(app);
     overlay = gtk_overlay_new();
+    g_signal_connect(overlay, "get-child-position", G_CALLBACK(onChildPosition), NULL);
     g_object_ref(app);
     gtk_container_remove(GTK_CONTAINER(box), app);
     gtk_container_add(GTK_CONTAINER(overlay), app);
@@ -592,23 +604,18 @@ static void placeOnMain(void *data) {
     giveKeysBack(view);
     g_object_ref(view);
     if (parent) gtk_container_remove(GTK_CONTAINER(parent), view);
-    if (work->shown) {
-      gtk_widget_set_halign(view, GTK_ALIGN_START);
-      gtk_widget_set_valign(view, GTK_ALIGN_START);
-      gtk_overlay_add_overlay(GTK_OVERLAY(overlay), view);
-    } else {
-      gtk_widget_set_margin_start(view, 0);
-      gtk_widget_set_margin_top(view, 0);
-      gtk_fixed_put(GTK_FIXED(parked), view, 0, 0);
-    }
+    if (work->shown) gtk_overlay_add_overlay(GTK_OVERLAY(overlay), view);
+    else gtk_fixed_put(GTK_FIXED(parked), view, 0, 0);
     g_object_unref(view);
   }
-  if (work->shown) {
-    gtk_widget_set_margin_start(view, (int)work->x);
-    gtk_widget_set_margin_top(view, (int)work->y);
-  }
-  gtk_widget_set_size_request(view, (int)work->width, (int)work->height);
+  GdkRectangle *frame = g_new(GdkRectangle, 1);
+  *frame = (GdkRectangle){(int)work->x, (int)work->y, (int)work->width, (int)work->height};
+  g_object_set_data_full(G_OBJECT(view), FRAME_KEY, frame, g_free);
+  gtk_widget_set_size_request(view, frame->width, frame->height);
   gtk_widget_show(view);
+  gtk_widget_queue_resize(view);
+  /* Where the page was is the app's own page again. */
+  gtk_widget_queue_draw(overlay);
 }
 
 void actBrowserPlace(uint64_t handle, int shown, double x, double y, double width, double height) {

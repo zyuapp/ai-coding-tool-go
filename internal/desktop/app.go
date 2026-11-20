@@ -171,6 +171,7 @@ func (app *App) Run() error {
 		LogLevel:           logger.WARNING,
 		LogLevelProduction: logger.ERROR,
 		OnStartup:          func(ctx context.Context) { app.startup(ctx, placement) },
+		OnDomReady:         func(context.Context) { app.nativePageReady() },
 		OnBeforeClose:      func(ctx context.Context) bool { return app.beforeQuit() },
 		OnShutdown:         func(ctx context.Context) { app.shutdown() },
 		Bind:               []any{app.bridge},
@@ -187,9 +188,13 @@ func (app *App) Run() error {
 			},
 			OnUrlOpen: app.openURL,
 		},
-		Linux: &linux.Options{ProgramName: app.options.AppName, WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand},
+		Linux: &linux.Options{ProgramName: LinuxAppID, WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand},
 	})
 }
+
+// LinuxAppID names the installed desktop entry (LinuxAppID.desktop). Docks match a window to it by its
+// X11 WM_CLASS or Wayland app id, which GTK takes from the program name.
+const LinuxAppID = "com.zyuapp.aicodingtool"
 
 // quitsWithLastWindow: macOS keeps the app running with no window.
 func quitsWithLastWindow() bool { return platformName != "macos" }

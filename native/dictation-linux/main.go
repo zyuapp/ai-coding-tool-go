@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Command aic-dictation-linux is holding to talk on Linux: it records the microphone and runs Parakeet
 // through ONNX Runtime, whose shared library sits beside it. It speaks the macOS helper's lines on
 // stdin and stdout (see speech.DictationHelper).

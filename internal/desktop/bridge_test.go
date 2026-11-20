@@ -155,3 +155,14 @@ func TestDescribeFiles(t *testing.T) {
 		t.Fatalf("described %+v %v", described, err)
 	}
 }
+
+func TestOptionalArgumentReadsNullAsAbsent(t *testing.T) {
+	for _, args := range [][]jsontext.Value{nil, {jsontext.Value(`null`)}} {
+		if value, err := optionalArg[struct{ X float64 }](args, 0); err != nil || value != nil {
+			t.Fatalf("%v: %v %v", args, value, err)
+		}
+	}
+	if value, err := optionalArg[struct{ X float64 }]([]jsontext.Value{jsontext.Value(`{"X":0}`)}, 0); err != nil || value == nil {
+		t.Fatalf("an object read as %v %v", value, err)
+	}
+}

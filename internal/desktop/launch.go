@@ -212,6 +212,9 @@ func (c *Controller) startup() {
 			}
 		}()
 	}
+	if appImage := platform.RunningAppImage(os.Getenv); c.options.Packaged && appImage != "" {
+		go c.registerAppImage(ctx, appImage)
+	}
 	if !platform.QuitsWithLastWindow {
 		c.lockAwake = platform.NewLockAwake(c.workAhead)
 	}
@@ -235,6 +238,17 @@ func (c *Controller) startup() {
 			log.Printf("Could not sweep unused app data: %v", err)
 		}
 	}()
+}
+
+// registerAppImage makes this AppImage, wherever it now sits, the handler of the app's links. Its icon
+// is the one the image ships beside its resources.
+func (c *Controller) registerAppImage(ctx context.Context, appImage string) {
+	home, _ := os.UserHomeDir()
+	icon := filepath.Join(filepath.Dir(c.options.Resources), "share", "icons", "hicolor", "512x512", "apps", "com.zyuapp.aicodingtool.png")
+	registration := updates.AppImageProtocolRegistration{AppImage: appImage, Home: home, IconSource: icon, DataHome: os.Getenv("XDG_DATA_HOME")}
+	if _, err := updates.RegisterAppImageProtocol(ctx, registration); err != nil {
+		log.Printf("Could not register the AppImage URL handler: %v", err)
+	}
 }
 
 // woke redials the paired computers, whose lines only look open after a sleep, and asks Tailscale
