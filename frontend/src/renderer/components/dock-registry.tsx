@@ -1,0 +1,280 @@
+import type { IconType } from "react-icons";
+import { LuAlarmClock as AlarmClock, LuBot as Bot, LuBoxes as Boxes, LuFileDiff as FileDiff, LuGitFork as GitFork, LuGlobe as Globe, LuLayoutGrid as LayoutGrid, LuSmartphone as Smartphone, LuSquareTerminal as SquareTerminal } from "react-icons/lu";
+import { CoordinatorOverview } from "./Coordination";
+import { AutomationPanel } from "./AutomationPanel";
+import { DiffPanel } from "./DiffPanel";
+import { AgentsPanel } from "./SubagentList";
+import { SubagentInspector } from "./SubagentInspector";
+import { WorkflowPanel } from "./WorkflowPanel";
+import { SimulatorPanel } from "./SimulatorPanel";
+import { EmptyState } from "../ui/EmptyState";
+import { platformCapabilities } from "../platform";
+import type { useTaskWorkspace } from "../task-workspace/useTaskWorkspace";
+import { AUTOMATION_PANEL, DIFF_PANEL, OVERVIEW_PANEL, SIMULATOR_PANEL } from "../../application/workspace-reducer";
+import { overviewGroups } from "../../application/coordination-view";
+import { isCoordinator } from "../../domain/coordination";
+import type { DiffState } from "../../application/workspace-state";
+import type { FindTarget } from "../../domain/find";
+import { REMOTE_UNSUPPORTED } from "../../contracts/computer-capabilities";
+import type { ReactNode } from "react";
+
+type Workspace = ReturnType<typeof useTaskWorkspace>;
+
+/**
+ * A view in the right dock that there is only ever one of. Pages, shells and side chats are tabs of
+ * their own instead: they are opened by a launcher below and drawn from the workspace's own records.
+ */
+export type DockPanel = {
+  id: string;
+  title: string;
+  description: string;
+  /** The name that opens this view from the composer, without its `/`. A panel with none is only ever opened by the thing it belongs to. */
+  command?: string;
+  icon: IconType;
+  badge?: number;
+  /** What the badge counts, said in full. */
+  badgeLabel?: string;
+  /** Whether the badge counts what waits on the user, or what is still going on, rather than a plain tally. */
+  badgeTone?: BadgeTone;
+  /** A tab the dock keeps for as long as it applies, so it has no close button. */
+  pinned?: boolean;
+  render: () => ReactNode;
+};
+
+/** An entry in the picker and the add menu: a panel to open, or an action that creates one. */
+export type DockLauncher = {
+  id: string;
+  title: string;
+  description: string;
+  command: string;
+  icon: IconType;
+  disabled?: boolean;
+  /** Why it is off, in full, and the few words a launcher shows in its place. */
+  disabledReason?: string;
+  disabledLabel?: string;
+  open: () => void;
+};
+
+export type BadgeTone = "attention" | "working";
+
+export type DockTab = { id: string; title: string; icon: IconType; badge?: number; badgeLabel?: string; badgeTone?: BadgeTone; pinned?: boolean; unread?: boolean };
+
+/** A launcher, disabled with the reason when its host lacks the command or the workspace lacks what it needs. */
+function launcher(entry: Omit<DockLauncher, "disabled" | "disabledReason" | "disabledLabel">, available: boolean, missing: string | null = null): DockLauncher {
+  if (!available) return { ...entry, disabled: true, disabledReason: REMOTE_UNSUPPORTED, disabledLabel: "Not on remote" };
+  return missing ? { ...entry, disabled: true, disabledReason: missing, disabledLabel: missing } : entry;
+}
+
+/** The add menu is an `openMenu` value like any other, so the dock can tell when it is over a page. */
+export const ADD_TAB_MENU = "dock-add";
+
+/** What the bar says it is searching, which only the registry knows the name of. */
+export function findLabel(target: FindTarget, panels: DockPanel[]): string {
+  switch (target.kind) {
+    case "browser": return "page";
+    case "terminal": return "terminal";
+    case "review": return "review";
+    case "panel": return panels.find((panel) => panel.id === target.panel)?.title.toLowerCase() ?? "panel";
+    case "thread": return "thread";
+  }
+}
+
+export function unreviewedFileCount(diff: DiffState) {
+  return diff.result?.status === "available" ? diff.result.files.filter((file) => !diff.viewed[file.path]).length : 0;
+}
+
+export type DockRegistry = { panels: DockPanel[]; launchers: DockLauncher[] };
+
+/** The schedule of the dock's own thread, or of the thread tab it is about. */
+function automationPanel(workspace: Workspace, scheduled: Workspace["threadTabs"][number] | undefined) {
+  const automation = scheduled ? scheduled.automation : workspace.automation;
+  return (
+    <AutomationPanel
+      automation={automation}
+      edit={automation ? workspace.automationEdits[automation.taskId] : undefined}
+      lastFoundAt={scheduled ? scheduled.thread.lastFindingAt ?? null : workspace.lastFoundAt}
+      lastChecked={scheduled ? scheduled.thread.lastChecked ?? null : workspace.lastChecked}
+      onEdit={(base, fields) => { if (automation) void workspace.dispatch({ type: "view.edit-automation", taskId: automation.taskId, base, fields }); }}
+      onUpdate={(patch) => void workspace.actions.updateAutomation(patch, scheduled?.id)}
+      onDelete={() => void workspace.actions.deleteAutomation(scheduled?.id)}
+      onRunNow={() => void workspace.actions.runAutomationNow(scheduled?.id)}
+    />
+  );
+}
+
+/** The device this dock shows, streamed only while its tab is the one on screen. */
+function simulatorPanel(workspace: Workspace): DockPanel {
+  return {
+    id: SIMULATOR_PANEL,
+    title: "Simulator",
+    description: "Run an iOS app in the background and drive it",
+    icon: Smartphone,
+    render: () => (
+      <SimulatorPanel
+        simulator={workspace.simulator}
+        udid={workspace.simulatorId}
+        active={workspace.dockOpen && workspace.dockTab === SIMULATOR_PANEL}
+        openMenu={workspace.openMenu}
+        onSetOpenMenu={workspace.actions.setOpenMenu}
+        onInput={workspace.actions.sendToSimulator}
+      />
+    ),
+  };
+}
+
+export function buildDock({ workspace, inspectedSubagent, workingSubagents, unreviewedFiles, onInspectSubagent, onCloseInspector, onOpenPanel, onAddSideChat }: {
+  workspace: Workspace;
+  inspectedSubagent: Workspace["subagents"][number] | undefined;
+  workingSubagents: number;
+  unreviewedFiles: number;
+  onInspectSubagent: (id: string) => void;
+  onCloseInspector: () => void;
+  onOpenPanel: (id: string) => void;
+  onAddSideChat: () => void;
+}): DockRegistry {
+  /** The bar points at one view at a time, and a review only ever counts a search that names it. */
+  const reviewFind = workspace.find?.target.kind === "review" ? workspace.find : null;
+  const searchedPanel = workspace.find?.target.kind === "panel" ? workspace.find.target.panel : null;
+  /** The searcher reads what a panel drew, so every view the tab can show draws whole while it reads. */
+  const findingAgents = searchedPanel === "agents";
+
+  const { subagents: feedsSubagents, workflows: feedsWorkflows } = workspace.capabilities;
+  /** A coordinator's review and schedule can be about one of its thread tabs rather than itself. */
+  const reviewed = workspace.threadTabs.find((tab) => tab.id === workspace.reviewSubject);
+  const scheduled = workspace.threadTabs.find((tab) => tab.id === workspace.automationSubject);
+  const reviewedEnvironment = reviewed ? reviewed.environment : workspace.environment;
+  const reviewedWorkspaceId = reviewed ? reviewed.workspaceId : workspace.workspaceId;
+
+  /**
+   * What waits on the user here: the threads that need them, and the threads suggested or asked for
+   * elsewhere that wait for them, counted as the sidebar counts them, so one already starting is not.
+   */
+  const waiting = workspace.coordination.waiting;
+  const needsYou = overviewGroups(workspace.coordination.members).needs.length + (waiting ? waiting.suggestions + waiting.requests.length : 0);
+  const lead = isCoordinator(workspace.currentThread) ? workspace.currentThread : undefined;
+  const { coordination } = workspace;
+
+  const panels: DockPanel[] = [
+    ...(lead && coordination.coordinator ? [{
+      id: OVERVIEW_PANEL,
+      title: "Overview",
+      description: "Follow the threads working under this coordinator",
+      icon: LayoutGrid,
+      badge: needsYou,
+      badgeLabel: `${needsYou} need${needsYou === 1 ? "s" : ""} you`,
+      badgeTone: "attention" as const,
+      pinned: true,
+      render: () => (
+        <CoordinatorOverview
+          header={{
+            taskId: lead.id,
+            threadModel: coordination.threadModel,
+            engineAccess: workspace.engineAccess,
+            favoriteModels: workspace.favoriteModels,
+            onModelFavorite: (engine, model, favorite) => void workspace.dispatch({ type: "view.set-model-favorite", engine, model, favorite }),
+            onSetThreadModel: (engine, model, effort) => void workspace.actions.setThreadModel(lead.id, engine, model, effort),
+            onEngineRead: workspace.actions.readEngineStatus,
+            onSignIn: workspace.actions.signInEngine,
+            onOpenEngineSettings: () => void workspace.actions.openSettingsSection(workspace.engineSettingsPage.section, workspace.engineSettingsPage.settingId),
+          }}
+          memory={{
+            ...coordination.memory,
+            taskId: lead.id,
+            onSetPurpose: (purpose) => void workspace.actions.setPurpose(lead.id, purpose),
+            onAdd: (text) => void workspace.actions.addNote(lead.id, text),
+            onEdit: (noteId, text) => void workspace.actions.editNote(lead.id, noteId, text),
+          }}
+          members={workspace.coordination.members}
+          usage={workspace.coordination.usage}
+          worktrees={workspace.worktreesById}
+          folds={workspace.overviewFolds}
+          onSetFold={(group, change) => void workspace.actions.setOverviewGroup(lead.id, group, change)}
+          stoppable={workspace.stoppableCoordinatorIds.has(lead.id)}
+          onSelect={workspace.actions.selectThread}
+        />
+      ),
+    }] : []),
+    ...(feedsSubagents ? [{
+      id: "agents",
+      title: "Subagents",
+      description: "View work delegated from this task",
+      command: "subagents",
+      icon: Bot,
+      badge: workingSubagents,
+      badgeLabel: `${workingSubagents} working`,
+      badgeTone: "working" as const,
+      render: () => (inspectedSubagent
+        ? <SubagentInspector subagent={inspectedSubagent} finding={findingAgents} onClose={onCloseInspector} onStop={workspace.actions.stopBackgroundProcess} />
+        : <AgentsPanel
+            subagents={workspace.subagents}
+            groups={workspace.subagentGroups}
+            finding={findingAgents}
+            onSelect={onInspectSubagent}
+            onSetGroup={(group, open) => void workspace.actions.setSubagentGroup(group, open)}
+          />),
+    }] : []),
+    ...(feedsWorkflows ? [{
+      id: "workflow",
+      title: workspace.inspectedWorkflow?.name ?? "Workflow",
+      description: "Follow a dynamic workflow the run is driving",
+      icon: Boxes,
+      render: () => (workspace.inspectedWorkflow
+        ? <WorkflowPanel workflow={workspace.inspectedWorkflow} onStop={workspace.actions.stopBackgroundProcess} />
+        : <EmptyState size="inline" title="This workflow is no longer running." />),
+    }] : []),
+    {
+      id: DIFF_PANEL,
+      title: reviewed ? `Changes · ${reviewed.title}` : "Changes",
+      description: "Review the diff and comment on it",
+      command: "diff",
+      icon: FileDiff,
+      badge: unreviewedFiles,
+      badgeLabel: `${unreviewedFiles} ${unreviewedFiles === 1 ? "file" : "files"} unreviewed`,
+      render: () => (
+        <DiffPanel
+          /** Per thread, so a selection or a half-typed note never carries into another thread's review. */
+          key={reviewed?.id ?? workspace.currentThread?.id ?? "draft"}
+          diff={workspace.diff}
+          workspaceId={workspace.diff.workspaceId ?? reviewedWorkspaceId}
+          currentBranch={reviewedEnvironment?.status === "available" && (!workspace.diff.workspaceId || workspace.diff.workspaceId === reviewedWorkspaceId) ? reviewedEnvironment.branch : null}
+          openMenu={workspace.openMenu}
+          onSetOpenMenu={workspace.actions.setOpenMenu}
+          find={reviewFind}
+          onFindResults={(results) => { if (reviewFind) void workspace.actions.reportFind(reviewFind.target, results); }}
+          onSetRange={workspace.actions.setDiffRange}
+          onSetMode={workspace.actions.setDiffMode}
+          onSetCollapsed={workspace.actions.setDiffCollapsed}
+          onSetViewed={workspace.actions.setDiffViewed}
+          onSetSplit={workspace.actions.setDiffSplit}
+          onSetIgnoreWhitespace={workspace.actions.setDiffIgnoreWhitespace}
+          onRefresh={workspace.actions.refreshDiff}
+          onOpenFile={(path) => void workspace.dispatch({ type: "file.open", path, ...(reviewed ? { taskId: reviewed.id } : {}) })}
+          annotations={reviewed ? reviewed.annotations : workspace.annotations}
+          onComment={(quote, note, anchor) => void workspace.dispatch({ type: "annotation.add", quote, note, anchor, ...(reviewed ? { taskId: reviewed.id } : {}) })}
+          onEditComment={(annotationId, note) => void workspace.dispatch({ type: "annotation.note", annotationId, note, ...(reviewed ? { taskId: reviewed.id } : {}) })}
+          onRemoveComment={(annotationId) => void workspace.dispatch({ type: "annotation.remove", annotationId, ...(reviewed ? { taskId: reviewed.id } : {}) })}
+        />
+      ),
+    },
+    ...(platformCapabilities().simulator ? [simulatorPanel(workspace)] : []),
+    {
+      id: AUTOMATION_PANEL,
+      title: scheduled ? `Automation · ${scheduled.title}` : "Automation",
+      description: "Edit the schedule that repeats this task",
+      command: "automation",
+      icon: AlarmClock,
+      render: () => automationPanel(workspace, scheduled),
+    },
+  ];
+
+  /** One click opens the thing itself: a launcher makes a tab rather than a panel that holds tabs. */
+  const launchers: DockLauncher[] = [
+    ...panels.flatMap(({ id, title, description, command, icon }) => command ? [launcher({ id, title, description, command, icon, open: () => onOpenPanel(id) }, workspace.commandControls.available({ type: "view.open-dock-panel", panel: id }))] : []),
+    launcher({ id: "browser", title: "Browser", description: "Browse in one session the whole app shares", command: "browser", icon: Globe, open: () => void workspace.actions.newBrowserTab() }, workspace.commandControls.available({ type: "browser.new-tab" })),
+    ...(platformCapabilities().simulator ? [launcher({ id: SIMULATOR_PANEL, title: "Simulator", description: `Run an iOS app in the background and let ${workspace.engineLabel} drive it`, command: "simulator", icon: Smartphone, open: () => void workspace.actions.openSimulator() }, workspace.commandControls.available({ type: "simulator.open" }), workspace.simulator.availability.status === "unsupported" ? workspace.simulator.availability.reason : null)] : []),
+    launcher({ id: "terminal", title: "Terminal", description: `Run a shell here and let ${workspace.engineLabel} read what it prints`, command: "terminal", icon: SquareTerminal, open: () => void workspace.actions.openTerminal() }, workspace.commandControls.available({ type: "terminal.open" }), workspace.currentFolder ? null : "Open a project to start a terminal"),
+    launcher({ id: "side-chat", title: "Side chat", description: "Start a focused conversation from this task", command: "side", icon: GitFork, open: onAddSideChat }, workspace.commandControls.available({ type: "side-chat.open", chatId: "new" }), workspace.currentThread ? null : "Open a thread to fork it"),
+  ];
+
+  return { panels, launchers };
+}

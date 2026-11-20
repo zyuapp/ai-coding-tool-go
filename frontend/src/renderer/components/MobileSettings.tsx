@@ -1,0 +1,294 @@
+import { LuArrowDown as ArrowDown, LuCheck as Check, LuRefreshCw as RefreshCw, LuSmartphone as Smartphone } from "react-icons/lu";
+import { useEffect, useRef, useState } from "react";
+import { addressOrigin, type MobileAddress, type MobileConnectionState, type MobilePairingOffer, type MobileServerState, type MobileSessionView, type PairedDeviceView, type TailscaleState } from "../../domain/mobile";
+import { SettingRow, SettingRowBase, SettingStatus, SettingSwitch } from "./SettingRow";
+import { SettingsPage, SettingsSection } from "./SettingsLayout";
+import { Button, ButtonLink } from "../ui/Button";
+import { Dialog } from "../ui/Dialog";
+import { ConfirmAction } from "../ui/ConfirmAction";
+import { ComputerSettings, type ComputerSettingsProps } from "./ComputerSettings";
+import { SpinningIcon } from "./SpinningIcon";
+import { CopyButton } from "./CopyButton";
+
+function statusLabel(remote: MobileServerState): string {
+  if (!remote.enabled) return "Off";
+  switch (remote.status) {
+    case "listening": return reachable(remote) ? "On" : "Waiting for Tailscale";
+    case "starting": return "Starting…";
+    case "error": return "Failed to start";
+    default: return "Off";
+  }
+}
+
+function statusTone(remote: MobileServerState): string {
+  if (!remote.enabled || remote.status === "off" || remote.status === "starting") return "neutral";
+  return remote.status === "listening" && reachable(remote) ? "ready" : "";
+}
+
+function addressOf(remote: MobileServerState, kind: MobileAddress["kind"]): MobileAddress | null {
+  return remote.addresses.find((address) => address.kind === kind) ?? null;
+}
+
+/** Whether a phone can reach the bridge at all, which is only ever through Tailscale. */
+function reachable(remote: MobileServerState): boolean {
+  return remote.primary?.kind === "tailscale-https";
+}
+
+/** Milliseconds left on the code, floored at zero. */
+function useCountdown(expiresAt: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (expiresAt === null) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [expiresAt]);
+  return expiresAt === null ? 0 : Math.max(0, expiresAt - now);
+}
+
+function countdownLabel(remaining: number): string {
+  const seconds = Math.ceil(remaining / 1_000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** A URL as a QR image, redrawn when the URL changes. The encoder is fetched the first time a QR is drawn. */
+function useQrCode(url: string | null): string | null {
+  const [image, setImage] = useState<string | null>(null);
+  useEffect(() => {
+    if (!url) {
+      setImage(null);
+      return;
+    }
+    let cancelled = false;
+    void import("qrcode")
+      .then(({ toDataURL }) => toDataURL(url, { margin: 1, scale: 6, errorCorrectionLevel: "M" }))
+      .then((drawn) => { if (!cancelled) setImage(drawn); })
+      .catch(() => { if (!cancelled) setImage(null); });
+    return () => { cancelled = true; };
+  }, [url]);
+  return image;
+}
+
+/** One line of the Tailscale checklist: done, still to do, or not yet worth asking about. `link` opens the page where the step is done. */
+type Step = { id: string; done: boolean; name: string; hint: string | null; link?: { label: string; href: string } };
+
+const TAILSCALE_DOWNLOAD = "https://tailscale.com/download";
+const TAILSCALE_DNS = "https://login.tailscale.com/admin/dns";
+const TESTFLIGHT_LINK = "https://testflight.apple.com/join/v37MHegn";
+
+function GetAppDialog({ onClose }: { onClose: () => void }) {
+  const qr = useQrCode(TESTFLIGHT_LINK);
+  const done = useRef<HTMLButtonElement>(null);
+  return (
+    <Dialog title="Get the iPhone app" className="phone-get-app" onClose={onClose} initialFocus={done}
+      actions={<Button ref={done} size="lg" onClick={onClose}>Done</Button>}>
+      <p>Scan with the iPhone's camera to install the beta from TestFlight.</p>
+      {qr
+        ? <img className="phone-qr" src={qr} alt={`QR code for ${TESTFLIGHT_LINK}`} />
+        : <div className="phone-qr placeholder" aria-hidden="true" />}
+      <div className="phone-pairing-url">
+        <code>{TESTFLIGHT_LINK.replace("https://", "")}</code>
+        <CopyButton text={TESTFLIGHT_LINK} label="Copy TestFlight link" />
+      </div>
+    </Dialog>
+  );
+}
+
+function tailscaleSteps(tailscale: TailscaleState, on: boolean): Step[] {
+  const installed = tailscale.status !== "missing" && tailscale.status !== "unknown";
+  const unavailable = tailscale.status === "unavailable";
+  const signedIn = tailscale.status === "ready";
+  const steps: Step[] = [
+    {
+      id: "installed",
+      done: installed,
+      name: "Installed on this computer",
+      hint: tailscale.status === "unknown" ? "Looking for Tailscale…" : installed ? null : "Install Tailscale, then check again.",
+      link: { label: "Download Tailscale", href: TAILSCALE_DOWNLOAD },
+    },
+    {
+      id: "signed-in",
+      done: signedIn,
+      name: signedIn && tailscale.magicDnsName ? `Signed in as ${tailscale.magicDnsName}` : "Signed in",
+      hint: installed && !signedIn && !unavailable ? "Open Tailscale and sign in." : null,
+    },
+    {
+      id: "https",
+      done: signedIn && tailscale.certs,
+      name: "HTTPS on",
+      hint: signedIn && !tailscale.certs ? "Turn on HTTPS in the Tailscale admin console, under DNS." : null,
+      link: { label: "Open admin console", href: TAILSCALE_DNS },
+    },
+    {
+      id: "serving",
+      done: tailscale.serving,
+      name: "Serving this computer",
+      hint: !on ? "Turns on with phone access." : tailscale.serving || !signedIn || !tailscale.certs ? null : "Not serving yet. Check again.",
+    },
+  ];
+  return steps;
+}
+
+/** `shown` counts the asks to bring the next step into view; each one scrolls to it, marks it, and focuses what does it. */
+function TailscaleSection({ remote, checking, onRefresh, shown }: { remote: MobileServerState; checking: boolean; onRefresh: () => void; shown: number }) {
+  const on = remote.enabled && remote.status === "listening";
+  const address = addressOf(remote, "tailscale-https");
+  const steps = tailscaleSteps(remote.tailscale, on);
+  /** The first thing still to do is the one the user acts on, so only it is drawn as needed. */
+  const needed = steps.find((step) => !step.done && step.hint && !(step.id === "serving" && !on))?.id ?? null;
+  const neededRow = useRef<HTMLDivElement>(null);
+  const check = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!shown) return;
+    const step = neededRow.current;
+    const control = step?.querySelector<HTMLElement>(".phone-check-link") ?? check.current;
+    (step ?? control)?.scrollIntoView({ block: "center" });
+    control?.focus({ preventScroll: true });
+  }, [shown]);
+  return (
+    <SettingsSection setting="phone.tailscale" description="The phone reaches this computer over your tailnet, so both need Tailscale signed into the same account."
+      action={<Button ref={check} disabled={checking} aria-busy={checking || undefined} onClick={onRefresh} icon={<SpinningIcon icon={RefreshCw} spinning={checking} size={14} aria-hidden="true" />}>{checking ? "Checking…" : "Check again"}</Button>}>
+      {steps.map((step) => (
+        <SettingRowBase ref={step.id === needed ? neededRow : undefined} density="compact" status={step.done}
+          className={`phone-check${step.done ? "" : " waiting"}${step.id === needed ? " needed" : ""}${step.id === needed && shown ? " found" : ""}`}
+          key={step.id === needed ? `${step.id}-${shown}` : step.id} data-step={step.id} title={step.name}
+          description={<>
+            {step.done && step.id === "serving" && address && <p><code>{addressOrigin(address)}</code></p>}
+            {!step.done && step.hint && <p>{step.hint}</p>}
+          </>}>
+          {step.id === needed && step.link && <ButtonLink className="phone-check-link" href={step.link.href} target="_blank" rel="noreferrer">{step.link.label}</ButtonLink>}
+        </SettingRowBase>
+      ))}
+      {remote.tailscale.error && <p className="settings-error" role="alert">{remote.tailscale.error}</p>}
+    </SettingsSection>
+  );
+}
+
+/**
+ * The QR and the code beside it. A code is asked for the moment the bridge can be reached and none
+ * is on screen, and again when the one on screen runs out while the page is open, so the user never
+ * has to press anything before scanning.
+ */
+function PairingSection({ pairing, ready, onCreatePairingCode }: { pairing: MobilePairingOffer | null; ready: boolean; onCreatePairingCode: () => void }) {
+  const remaining = useCountdown(pairing?.expiresAt ?? null);
+  const live = pairing !== null && remaining > 0;
+  const qr = useQrCode(pairing?.url ?? null);
+  const asked = useRef<string | null>(null);
+  const [gettingApp, setGettingApp] = useState(false);
+  useEffect(() => {
+    if (!ready || live) return;
+    /** One request per code that has run out, so a bridge that will not mint is not asked in a loop. */
+    const key = pairing?.code ?? "none";
+    if (asked.current === key) return;
+    asked.current = key;
+    onCreatePairingCode();
+  }, [ready, live, pairing?.code, onCreatePairingCode]);
+
+  return (
+    <SettingsSection setting="phone.pairing" description="Scan the code with the phone's camera. Each code works once and lasts two minutes."
+      action={<>
+        <Button onClick={() => setGettingApp(true)}>Get the app</Button>
+        <Button disabled={!ready} onClick={onCreatePairingCode}>New code</Button>
+      </>}>
+      {gettingApp && <GetAppDialog onClose={() => setGettingApp(false)} />}
+      {!ready && <p className="settings-empty">Turn phone access on and finish the Tailscale steps to pair a phone.</p>}
+      {ready && !pairing && <p className="settings-empty">Making a code…</p>}
+      {ready && pairing && (
+        <div className="phone-pairing">
+          {qr
+            ? <img className={`phone-qr${live ? "" : " expired"}`} src={qr} alt={`QR code for ${pairing.url}`} />
+            : <div className="phone-qr placeholder" aria-hidden="true" />}
+          <div className="phone-pairing-copy">
+            <strong>{pairing.code}</strong>
+            {live
+              ? <p>Expires in {countdownLabel(remaining)}.</p>
+              : <p className="phone-pairing-expired">This code has expired. Making a new one…</p>}
+            <div className="phone-pairing-url">
+              <code>{pairing.url}</code>
+              <CopyButton text={pairing.url} label="Copy pairing link" />
+            </div>
+          </div>
+        </div>
+      )}
+    </SettingsSection>
+  );
+}
+
+/** What a phone is doing right now, from the best of the sessions it holds. */
+function deviceConnection(device: PairedDeviceView, sessions: MobileSessionView[]): MobileConnectionState | null {
+  const rank: MobileConnectionState[] = ["live", "resuming", "connecting", "offline"];
+  const held = sessions.filter((session) => session.deviceId === device.id);
+  for (const state of rank) if (held.some((session) => session.connection === state)) return state;
+  return null;
+}
+
+function deviceLabel(device: PairedDeviceView, connection: MobileConnectionState | null): string {
+  if (connection === "live") return "Connected";
+  if (connection === "resuming") return "Catching up…";
+  if (connection === "connecting") return "Connecting…";
+  if (connection === "offline") return "Reconnecting…";
+  if (device.lastSeenAt === null) return "Never connected";
+  const days = Math.floor((Date.now() - device.lastSeenAt) / 86_400_000);
+  if (days === 0) return "Seen today";
+  return days === 1 ? "Seen yesterday" : `Seen ${days} days ago`;
+}
+
+function DeviceSection({ devices: paired, sessions, onRevokeDevice }: { devices: PairedDeviceView[]; sessions: MobileSessionView[]; onRevokeDevice: (deviceId: string) => void }) {
+  const devices = paired.filter((device) => device.kind === "phone");
+  const connected = devices.filter((device) => deviceConnection(device, sessions) === "live").length;
+  return (
+    <SettingsSection setting="phone.phones" description="A connected phone keeps this computer awake. Closing this window stops phone access. Removing a phone cuts it off at once."
+      action={<span>{devices.length === 0 ? "None paired" : `${connected} of ${devices.length} connected`}</span>}>
+      {devices.length === 0
+        ? <p className="settings-empty">No phone has paired yet.</p>
+        : devices.map((device) => {
+          const connection = deviceConnection(device, sessions);
+          return (
+            <SettingRowBase key={device.id} data-device={device.id} title={device.name}
+              leading={<SettingStatus done={connection === "live"} quiet>{connection === "live" ? <Check size={14} /> : <Smartphone size={14} />}</SettingStatus>}
+              description={<p className={`phone-device-state${connection === "live" ? " live" : ""}`}>{deviceLabel(device, connection)}</p>}>
+              <ConfirmAction variant="danger" aria-label={`Remove ${device.name}`} confirm={`Remove ${device.name}`} onConfirm={() => onRevokeDevice(device.id)}>Remove</ConfirmAction>
+            </SettingRowBase>
+          );
+        })}
+    </SettingsSection>
+  );
+}
+
+export type MobileSettingsProps = {
+  remote: MobileServerState;
+  remoteChecking: boolean;
+  onSetEnabled: (enabled: boolean) => void;
+  onCreatePairingCode: () => void;
+  onRevokeDevice: (deviceId: string) => void;
+  onRefreshTailscale: () => void;
+  computers: ComputerSettingsProps;
+};
+
+export function MobileSettings({ remote, remoteChecking, onSetEnabled, onCreatePairingCode, onRevokeDevice, onRefreshTailscale, computers }: MobileSettingsProps) {
+  const listening = remote.enabled && remote.status === "listening";
+  const ready = listening && reachable(remote);
+  const [shownStep, setShownStep] = useState(0);
+
+  return (
+    <SettingsPage title="Devices" description="Your threads from the iPhone app or another computer, anywhere your tailnet reaches.">
+      <ComputerSettings {...computers} />
+
+      <SettingsSection title="Access" badge={listening && !ready
+        ? <button type="button" className="settings-pill-jump" onClick={() => setShownStep((count) => count + 1)}>{statusLabel(remote)}<ArrowDown size={12} aria-hidden="true" /></button>
+        : <span className={statusTone(remote)}>{statusLabel(remote)}</span>}>
+        <SettingRow id="phone.availability" description="Lets the iPhone app reach this computer through Tailscale. Turning it off drops every phone.">
+          <SettingSwitch id="phone.availability" on={remote.enabled} onChange={onSetEnabled} />
+        </SettingRow>
+
+        {remote.error && <p className="settings-error" role="alert">{remote.error}</p>}
+      </SettingsSection>
+
+      <TailscaleSection remote={remote} checking={remoteChecking} onRefresh={onRefreshTailscale} shown={shownStep} />
+
+      <PairingSection pairing={remote.pairing} ready={ready} onCreatePairingCode={onCreatePairingCode} />
+
+      <DeviceSection devices={remote.devices} sessions={remote.sessions} onRevokeDevice={onRevokeDevice} />
+    </SettingsPage>
+  );
+}

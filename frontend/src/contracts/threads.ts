@@ -1,0 +1,199 @@
+import type { SimulatorDevice, SimulatorShot, SimulatorSnapshot } from "../domain/simulator.js";
+import type { AppCommand } from "./commands.js";
+import type { AgentCommandType } from "./workspace-view-input.js";
+import type { BrowserInspection, BrowserInspectionResult, BrowserShot, BrowserSnapshot, BrowserTab } from "../domain/browser.js";
+import type { ConversationMessageKind } from "../domain/conversation.js";
+import type { TerminalSession, TerminalSnapshot } from "../domain/terminal.js";
+import type { ThreadRole } from "../domain/thread-role.js";
+import type { CoordinationState, DecisionRequest, MemoryChange, ProposalRequest } from "../domain/coordination.js";
+
+export type TaskMessageKind = ConversationMessageKind;
+
+/** A paired query can spend 30 seconds on the wire before reporting a lost connection. */
+export const REMOTE_THREAD_READ_TIMEOUT_MS = 40_000;
+
+/** Which threads a query covers: everything, one project, or the threads that belong to no project. */
+export type ProjectScope =
+  | { kind: "all" }
+  | { kind: "project"; projectId: string }
+  | { kind: "projectless" };
+
+/** What a caller may narrow a listing by. `project` is resolved against the caller's own thread. */
+export type ThreadListQuery = {
+  computer?: string;
+  project?: string;
+  archived?: boolean;
+  idleForMs?: number;
+  search?: string;
+  attachments?: boolean;
+  limit?: number;
+};
+
+export type ThreadFilter = {
+  scope: ProjectScope;
+  /** Archived threads are excluded unless this asks for them. */
+  archived?: boolean;
+  /** Keeps only threads that have done nothing for at least this long. */
+  idleForMs?: number;
+  /** Case-insensitive match against the title and the message text. */
+  search?: string;
+  /** Threads whose unloaded history on disk matches `search`; without it, unloaded threads match on title only. */
+  stored?: ReadonlySet<string>;
+  /** Keeps only threads where at least one message carries an image. */
+  attachments?: boolean;
+  limit?: number;
+};
+
+export type ThreadSummary = {
+  /** Present for a thread held by a paired computer; offline rows are cached summaries. */
+  computer?: { id: string; name: string; offline: boolean };
+  id: string;
+  title: string;
+  /** The part the user gave the thread, when they gave it one. */
+  role?: ThreadRole;
+  projectId?: string;
+  projectRoot?: string;
+  /** The checkout the thread works in, when it works in one. Its id is what starts a thread there. */
+  worktreeId?: string;
+  worktreeRoot?: string;
+  status: "idle" | "running" | "stopped";
+  /** Set while the thread waits for its usage limit to lift; it counts as running until then. */
+  pausedUntil?: number;
+  archived: boolean;
+  createdAt: number;
+  lastActivityAt: number;
+  messageCount: number;
+  /** How many of those messages carry images. */
+  attachmentCount: number;
+};
+
+export type ThreadMessage = {
+  kind: TaskMessageKind;
+  text: string;
+  /** Where a user message came from when the user did not write it, such as another thread. */
+  origin?: string;
+  at: number;
+};
+
+export type ThreadTranscript = {
+  thread: ThreadSummary;
+  /** The newest messages, oldest first. `omitted` counts the older ones the limit left out. */
+  messages: ThreadMessage[];
+  omitted: number;
+};
+
+/**
+ * The commands anything outside the window may dispatch. Starting a thread (in the project checkout,
+ * in a worktree of its own, or in one the project already has), continuing, archiving and stopping
+ * one is allowed, as is moving one into a worktree the project already has or back to the project,
+ * deleting a worktree by its id, giving a thread its role and driving the browser panel; moving the
+ * user around the app, changing how much a thread is allowed to do, removing projects, clearing the
+ * browser session, and answering approvals — the browser's own included — are not.
+ */
+export type ExternalCommand = Extract<AppCommand, { type: AgentCommandType }>;
+
+/** A run drives the browser as the thread it is, so the channel names the thread, not the caller. */
+type WithoutTask<T> = T extends unknown ? Omit<T, "taskId"> : never;
+export type BrowserWrite = WithoutTask<Extract<ExternalCommand, { type: `browser.${string}` }>>;
+
+/** What a caller may read about the browser panel. A snapshot waits for the tab to settle first. */
+export type BrowserRead =
+  | { op: "tabs" }
+  | { op: "snapshot"; tabId?: string; textLimit?: number; timeoutMs: number }
+  | { op: "screenshot"; tabId?: string; fullPage?: boolean; timeoutMs: number }
+  | (BrowserInspection & { tabId?: string });
+
+/** A snapshot of the tab, or the navigation the user has yet to answer instead. */
+export type BrowserReadResult =
+  | { kind: "tabs"; tabs: BrowserTab[] }
+  | { kind: "snapshot"; snapshot: BrowserSnapshot }
+  | { kind: "shot"; shot: BrowserShot }
+  | BrowserInspectionResult
+  | { kind: "awaiting-approval"; url: string }
+  | { kind: "no-tab" };
+
+export type SimulatorWrite = WithoutTask<Extract<ExternalCommand, { type: `simulator.${string}` }>>;
+
+/** What a run may read about the device its dock's Simulator panel shows. */
+export type SimulatorRead =
+  /** Waits up to `timeoutMs` for the device to finish booting, then says where it stands. */
+  | { op: "status"; timeoutMs: number }
+  | { op: "snapshot"; screenshot: boolean };
+
+export type SimulatorReadResult =
+  | { kind: "status"; device: SimulatorDevice; booted: boolean; error?: string }
+  | { kind: "snapshot"; snapshot: SimulatorSnapshot; shot?: SimulatorShot }
+  | { kind: "no-simulator"; reason: string };
+
+/**
+ * What a caller may read about the terminal panel. There is no write to match it: the panel holds the
+ * user's own shell, and a run that wants to run something has Bash of its own.
+ */
+export type TerminalRead =
+  | { op: "terminals" }
+  | { op: "snapshot"; terminalId?: string; lines?: number; match?: string };
+
+export type TerminalReadResult =
+  | { kind: "terminals"; terminals: TerminalSession[] }
+  | { kind: "snapshot"; snapshot: TerminalSnapshot }
+  | { kind: "no-terminal" };
+
+/** Thread tool calls travel from the agent process to the window and back. */
+export type ThreadRequest = {
+  type: "thread.request";
+  requestId: string;
+  /** The thread the calling run belongs to, which is what "this project" resolves against. */
+  taskId: string;
+} & (
+  | ({ op: "list" } & ThreadListQuery)
+  | { op: "read"; threadId: string; limit?: number; computer?: string }
+  | { op: "wait"; threadId: string; timeoutMs: number }
+  /** `computer` names the paired computer a new thread starts on. */
+  | { op: "command"; command: ExternalCommand; computer?: string }
+  | { op: "browser"; read: BrowserRead }
+  | { op: "terminal"; read: TerminalRead }
+  | { op: "simulator"; read: SimulatorRead }
+  | { op: "notify"; report: FindingReport }
+  | { op: "nothing-to-report"; checked: string }
+  | { op: "report"; state: CoordinationState; summary: string }
+  | { op: "decision"; request: DecisionRequest }
+  /** A coordinator remembering, forgetting, or setting its purpose. Editing a note in place is the user's alone. */
+  | { op: "memory"; change: Exclude<MemoryChange, { kind: "edit" }> }
+  /** A coordinator suggesting threads for the user to start. */
+  | { op: "propose"; proposals: ProposalRequest[] }
+);
+
+/** What a scheduled run says it found. The window keeps it; the run only reports it. */
+export type FindingReport = {
+  headline: string;
+  detail?: string;
+  /** What the finding is about, stable across runs, so the same one is not raised twice. */
+  key?: string;
+};
+
+/** What the window did with a run's report, in the words the tool answers with. */
+export type FindingResult = {
+  /** False when nothing was written: an unscheduled turn, or an issue the thread already knows. */
+  recorded: boolean;
+  note: string;
+};
+
+export type ThreadResponse = {
+  type: "thread.response";
+  requestId: string;
+} & ({ ok: true; result: unknown } | { ok: false; message: string });
+
+/** How a thread stood when the wait ended, and what it last said. */
+export type ThreadWaitResult = {
+  thread: ThreadSummary;
+  /** True when the wait ran out with the thread still working. */
+  timedOut: boolean;
+  reply: string | null;
+};
+
+/** What a dispatched command did, so the caller can name the thread it just acted on. */
+export type ThreadCommandResult = {
+  thread: ThreadSummary | null;
+  /** What a deleted worktree left behind, such as the commit its loose work went into. */
+  notice?: string;
+};

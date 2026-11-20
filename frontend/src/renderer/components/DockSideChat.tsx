@@ -1,0 +1,145 @@
+import { memo, useMemo, type ReactNode } from "react";
+import { SideChat } from "./SideChat";
+import { attachDroppedFiles, imageSources } from "../dropped-files";
+import type { useTaskWorkspace } from "../task-workspace/useTaskWorkspace";
+import type { AppCommand, ReadingPoint } from "../../contracts/commands";
+import type { DockConversationView, SideChatView } from "../../application/workspace-view";
+import type { FindView } from "../../application/workspace-find";
+import type { AgentEngine, AgentModel, EngineModel } from "../../domain/agent-engine";
+import type { AgentEffort, ExecutionPolicy } from "../../domain/run";
+import type { ThreadHandleOption } from "../../domain/thread-handles";
+import type { Annotation, AnnotationAnchor, AttachedFile, PastedText } from "../../domain/conversation";
+import { attachmentSendFor, type AttachmentSendState } from "../../application/composer-attachments";
+import type { Project } from "../../domain/project";
+import type { Thread } from "../../domain/thread";
+
+type Workspace = ReturnType<typeof useTaskWorkspace>;
+type Dispatch = (command: AppCommand) => Promise<void>;
+
+/** Everything one chat's controls do, built once per chat so a redraw elsewhere never rebuilds them. */
+export function chatHandlers(dispatch: Dispatch, chatId: string, images: DockConversationView["images"]) {
+  return {
+    onPrompt: (prompt: string) => void dispatch({ type: "view.set-prompt", taskId: chatId, prompt }),
+    onAnnotateAdd: ({ quote, note, anchor }: { quote: string; note: string; anchor: AnnotationAnchor }) =>
+      void dispatch({ type: "annotation.add", taskId: chatId, quote, note, anchor }),
+    onAnnotateNote: (annotationId: string, note: string) => void dispatch({ type: "annotation.note", taskId: chatId, annotationId, note }),
+    onAnnotateRecall: (annotations: Annotation[]) => void dispatch({ type: "annotation.recall", taskId: chatId, annotations }),
+    onAnnotateRemove: (annotationId: string) => void dispatch({ type: "annotation.remove", taskId: chatId, annotationId }),
+    onAnnotateReveal: (annotationId: string) => void dispatch({ type: "annotation.reveal", taskId: chatId, annotationId }),
+    onPasteAdd: (text: string) => void dispatch({ type: "paste.add", taskId: chatId, text }),
+    onPasteRecall: (pastes: PastedText[]) => void dispatch({ type: "paste.recall", taskId: chatId, pastes }),
+    onPasteRemove: (pasteId: string) => void dispatch({ type: "paste.remove", taskId: chatId, pasteId }),
+    onFilesAdd: (files: File[]) => void attachDroppedFiles(files, chatId, dispatch, imageSources(images)),
+    onFileRecall: (files: AttachedFile[]) => void dispatch({ type: "file.recall", taskId: chatId, files }),
+    onFileRemove: (fileId: string) => void dispatch({ type: "file.detach", taskId: chatId, fileId }),
+    onImageRecall: (paths: string[]) => void dispatch({ type: "image.recall", taskId: chatId, paths }),
+    onImageRemove: (imageId: string) => void dispatch({ type: "image.remove", taskId: chatId, imageId }),
+    onReadingPointMove: (point: ReadingPoint) => void dispatch({ type: "view.reading-point", taskId: chatId, point }),
+    onCancel: () => void dispatch({ type: "run.cancel", taskId: chatId }),
+    onDecide: ({ runId, approvalId }: { runId: string; approvalId: string }, allow: boolean) => void dispatch({ type: "run.decide", allow, taskId: chatId, runId, approvalId }),
+    onPolicyChange: (policy: ExecutionPolicy) => void dispatch({ type: "task.set-policy", taskId: chatId, policy }),
+    onModelFavorite: (engine: AgentEngine, model: AgentModel, favorite: boolean) => void dispatch({ type: "view.set-model-favorite", engine, model, favorite }),
+    onModelChange: (engine: AgentEngine, model: AgentModel) => void dispatch({ type: "task.set-model", taskId: chatId, engine, model }),
+    onFastModeChange: (fastMode: boolean) => void dispatch({ type: "task.set-fast-mode", taskId: chatId, fastMode }),
+    onEffortChange: (engine: AgentEngine, effort: AgentEffort) => void dispatch({ type: "task.set-effort", taskId: chatId, engine, effort }),
+    onEditQueued: (messageId: string) => void dispatch({ type: "task.edit-queued", taskId: chatId, messageId }),
+    onSteerQueued: (messageId: string) => void dispatch({ type: "task.steer-queued", taskId: chatId, messageId }),
+    onDropQueued: (messageId: string) => void dispatch({ type: "task.drop-queued", taskId: chatId, messageId }),
+  };
+}
+
+/**
+ * One chat's tab. Memoized, and given only what the chat itself reads, so a run filling the main
+ * thread with reports leaves it alone.
+ */
+const DockSideChatTab = memo(function DockSideChatTab({ chat, dispatch, attachmentSend, favoriteModels, engineLabel, sourceTitle, sourceContinued, project, threads, active, focusToken, find, findBar, updateAvailable, onClose }: {
+  chat: SideChatView;
+  dispatch: Dispatch;
+  /** Where this chat's own images stand between its send and the run. */
+  attachmentSend: AttachmentSendState;
+  favoriteModels: EngineModel[];
+  engineLabel: string;
+  sourceTitle: string;
+  /** Whether the thread this chat forks has a session to fork, which is what it starts from. */
+  sourceContinued: boolean;
+  project: Project | undefined;
+  threads: ThreadHandleOption[];
+  active: boolean;
+  focusToken: number;
+  /** The bar, and the match it is showing, only when it is this chat's own thread being searched. */
+  find: FindView | null;
+  findBar: ReactNode;
+  updateAvailable: boolean;
+  onClose: (chatId: string) => void;
+}) {
+  const handlers = useMemo(() => chatHandlers(dispatch, chat.id, chat.images), [dispatch, chat.id, chat.images]);
+  const close = useMemo(() => () => onClose(chat.id), [onClose, chat.id]);
+  return (
+    <div data-dock-tab={chat.id} hidden={!active}>
+      <SideChat
+        outbox={{
+          state: attachmentSend,
+          send: (attachments, steer) => void dispatch({ type: "attachments.send", taskId: chat.id, attachments, steer }),
+          notice: (message) => void dispatch({ type: "attachments.notice", taskId: chat.id, message }),
+        }}
+        onAnswerQuestion={(question) => void dispatch({ type: "question.answer", taskId: chat.id, runId: question.runId, requestId: question.requestId, questionId: question.questionId })}
+        onQuestionAnswerChange={(question, text) => void dispatch({ type: "question.set-answer", taskId: chat.id, runId: question.runId, requestId: question.requestId, questionId: question.questionId, text })}
+        chat={chat}
+        favoriteModels={favoriteModels}
+        engineLabel={engineLabel}
+        focusToken={focusToken}
+        find={find}
+        findBar={findBar}
+        sourceTitle={sourceTitle}
+        sourceContinued={sourceContinued}
+        folder={project?.root ?? ""}
+        {...(project?.workspaceId ? { workspaceId: project.workspaceId } : {})}
+        threads={threads}
+        readingPoint={chat.readingPoint}
+        {...handlers}
+        updateAvailable={updateAvailable}
+        onClose={close}
+      />
+    </div>
+  );
+});
+
+/** The side chats the dock holds as tabs of their own, each drawn from the workspace's own records. */
+export function DockSideChats({ workspace, source, activeTab, find, findBar, focusTokenFor, onClose }: {
+  workspace: Workspace;
+  source: Thread;
+  activeTab: string;
+  find: FindView | null;
+  findBar: ReactNode;
+  focusTokenFor: (tab: string) => number;
+  onClose: (chatId: string) => void;
+}) {
+  return (
+    <>
+      {workspace.sideChats.map((chat) => {
+        /** Only the chat being searched is handed the bar, so the others are not redrawn by a query. */
+        const searched = find?.target.kind === "thread" && find.target.taskId === chat.id ? find : null;
+        return (
+          <DockSideChatTab
+            key={chat.id}
+            chat={chat}
+            dispatch={workspace.dispatch}
+            attachmentSend={attachmentSendFor(workspace.attachmentSends, chat.id)}
+            favoriteModels={workspace.favoriteModels}
+            engineLabel={workspace.engineLabel}
+            sourceTitle={source.title}
+            sourceContinued={Boolean(source.continuation)}
+            project={workspace.currentProject}
+            threads={workspace.threadHandlesFor(chat.id)}
+            active={activeTab === chat.id}
+            focusToken={focusTokenFor(chat.id)}
+            find={searched}
+            findBar={searched ? findBar : null}
+            updateAvailable={workspace.appUpdate.status !== "idle"}
+            onClose={onClose}
+          />
+        );
+      })}
+    </>
+  );
+}

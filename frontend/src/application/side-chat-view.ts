@@ -1,0 +1,110 @@
+import type { QueuedMessageView, SideChat, WorkspaceState } from "./workspace-state.js";
+import { queuedView } from "./state/runs.js";
+import type { ReadingPoint } from "../contracts/commands.js";
+import type { Annotation, AttachedFile, PastedText, StagedImage } from "../domain/conversation.js";
+import type { RetryNotice } from "../domain/run.js";
+import type { PendingQuestion } from "../domain/agent-question.js";
+import type { ApprovalView, StreamingTail, ThreadRunStatus } from "./thread-run-state.js";
+import { annotationRevealFor, annotationsFor, filesFor, imagesFor, pastesFor, type AnnotationReveal } from "./composer-drafts.js";
+import { runStatus } from "./run-record.js";
+import { coordinatedThreadStatus, type CoordinatedThreadStatus } from "./coordinated-thread-status.js";
+import { projectFor, threadWorkspaceId } from "./thread-location.js";
+import { pullRequestFor } from "./pull-request-view.js";
+import type { Thread } from "../domain/thread.js";
+import type { AutomationView } from "../domain/automation.js";
+import type { PullRequestAnswer } from "../domain/pull-request.js";
+import type { ChangedFilesResult } from "../contracts/ipc.js";
+import { threadModel, type AgentModel } from "../domain/agent-engine.js";
+import { catalogOf } from "./state/engines.js";
+
+const NO_QUEUED: QueuedMessageView[] = [];
+
+/** A conversation drawn in a dock tab: its thread, its composer's draft, and its run as it stands. */
+export type DockConversationView = {
+  id: string;
+  title: string;
+  thread: Thread;
+  /** What the thread runs on, or none while its engine has yet to name a model. */
+  model: AgentModel | undefined;
+  prompt: string;
+  annotations: Annotation[];
+  annotationReveal: AnnotationReveal | null;
+  pastes: PastedText[];
+  images: StagedImage[];
+  files: AttachedFile[];
+  running: boolean;
+  compacting: boolean;
+  retrying: RetryNotice | null;
+  status: ThreadRunStatus;
+  streamingTail: StreamingTail | null;
+  queuedMessages: QueuedMessageView[];
+  approval?: ApprovalView;
+  question?: PendingQuestion;
+  readingPoint: ReadingPoint;
+};
+
+export type SideChatView = SideChat & DockConversationView;
+
+/** A thread under the coordinator in front, opened as a tab in its dock. */
+export type ThreadTabView = DockConversationView & {
+  standing: CoordinatedThreadStatus;
+  summary: string | null;
+  folder: string;
+  workspaceId?: string;
+  /** What Git last said about the thread's checkout, and the pull request its branch belongs to. */
+  environment: ChangedFilesResult | null;
+  pullRequest: PullRequestAnswer;
+  automation: AutomationView | null;
+};
+
+/** One thread drawn in a dock tab, projected from the thread and its active run. */
+function dockConversationView(state: WorkspaceState, thread: Thread): DockConversationView {
+  const active = state.activeRuns[thread.id];
+  const approval = active?.status === "awaiting-approval" ? state.approvals[active.runId] as ApprovalView | undefined : undefined;
+  return {
+    id: thread.id,
+    title: thread.title,
+    thread,
+    model: threadModel(catalogOf(state), thread),
+    prompt: state.prompts[thread.id] ?? "",
+    annotations: annotationsFor(state, thread.id),
+    annotationReveal: annotationRevealFor(state, thread.id),
+    pastes: pastesFor(state, thread.id),
+    images: imagesFor(state, thread.id),
+    files: filesFor(state, thread.id),
+    running: Boolean(active),
+    question: active?.questions?.[0],
+    compacting: active?.status === "compacting",
+    retrying: active?.retry ?? null,
+    status: runStatus(state, thread.id),
+    streamingTail: state.streamingTails[thread.id] ?? null,
+    queuedMessages: queuedView(state, thread.id) ?? NO_QUEUED,
+    readingPoint: state.readingPoints[thread.id] ?? null,
+    ...(approval ? { approval } : {}),
+  };
+}
+
+/** One open side chat projected from its owning thread and active run. */
+export function sideChatView(state: WorkspaceState, chat: SideChat): SideChatView[] {
+  const thread = state.threads.find((item) => item.id === chat.id);
+  return thread ? [{ ...chat, ...dockConversationView(state, thread) }] : [];
+}
+
+/** One thread's tab in its coordinator's dock, with where its work stands. */
+export function threadTabView(state: WorkspaceState, taskId: string, busy: Set<string>, blocked: Set<string>): ThreadTabView[] {
+  const thread = state.threads.find((item) => item.id === taskId);
+  if (!thread) return [];
+  const { status: standing, summary } = coordinatedThreadStatus(thread, busy, blocked);
+  const workspaceId = threadWorkspaceId(state, thread);
+  const environment = (workspaceId ? state.environments[workspaceId] : undefined) ?? null;
+  return [{
+    ...dockConversationView(state, thread),
+    standing,
+    summary,
+    folder: projectFor(state, thread)?.root ?? "",
+    ...(workspaceId ? { workspaceId } : {}),
+    environment,
+    pullRequest: pullRequestFor(state.pullRequest, workspaceId, environment),
+    automation: state.automations.find((item) => item.taskId === thread.id) ?? null,
+  }];
+}

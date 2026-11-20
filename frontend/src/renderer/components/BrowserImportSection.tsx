@@ -1,0 +1,147 @@
+import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
+import { SettingRowBase, SettingStatus } from "./SettingRow";
+import { SettingsSection } from "./SettingsLayout";
+import { Button } from "../ui/Button";
+import { SearchField } from "../ui/Field";
+import { LuRotateCw as Again } from "react-icons/lu";
+import { NO_BROWSER_IMPORT, sourceName, type BrowserImportPicker, type BrowserImportState } from "../../application/browser-import";
+import { MAX_IMPORT_SITES, type BrowserImportSource } from "../../domain/browser-import";
+import { SpinningIcon } from "./SpinningIcon";
+
+/** A long list draws this many rows; searching reaches the rest. */
+const SHOWN_SITES = 200;
+
+export type BrowserImportSettings = {
+  state: BrowserImportState;
+  onRead: () => void;
+  onChoose: (sourceId: string | null) => void;
+  onToggle: (site: string) => void;
+  onFilter: (text: string) => void;
+  onRun: () => void;
+  onAgain: () => void;
+};
+
+export const NO_BROWSER_IMPORT_SETTINGS: BrowserImportSettings = {
+  state: NO_BROWSER_IMPORT,
+  onRead() {}, onChoose() {}, onToggle() {}, onFilter() {}, onRun() {}, onAgain() {},
+};
+
+function SitePicker({ picker, importing, onToggle, onFilter, onRun, onCancel }: {
+  picker: BrowserImportPicker;
+  importing: boolean;
+  onToggle: (site: string) => void;
+  onFilter: (text: string) => void;
+  onRun: () => void;
+  onCancel: () => void;
+}) {
+  const query = picker.filter.trim().toLowerCase();
+  const matching = useMemo(() => (picker.sites ?? []).filter((site) => site.domain.includes(query)), [picker.sites, query]);
+  const selected = new Set(picker.selected);
+  const count = picker.selected.length;
+  const ticked = matching.filter((site) => selected.has(site.domain)).length;
+  const all = matching.length > 0 && ticked === matching.length;
+  const room = MAX_IMPORT_SITES - count;
+  const full = room <= 0;
+  const everyBox = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (everyBox.current) everyBox.current.indeterminate = ticked > 0 && !all;
+  });
+  /** Ticks every matching site the import has room for, or clears them once there is nothing left to tick. */
+  const toggleMatching = () => {
+    const adding = !all && room > 0;
+    const changed = adding ? matching.filter((site) => !selected.has(site.domain)).slice(0, room) : matching.filter((site) => selected.has(site.domain));
+    for (const site of changed) onToggle(site.domain);
+  };
+  /** Escape empties the search first, then closes the picker. */
+  const escape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || importing) return;
+    event.preventDefault();
+    if (picker.filter) onFilter("");
+    else onCancel();
+  };
+
+  return (
+    <div className="browser-import-picker" onKeyDown={escape}>
+      {picker.sites === null
+        ? <p className="browser-import-quiet">Reading sites…</p>
+        : picker.sites.length === 0
+          ? <p className="browser-import-quiet">This profile holds no sign-ins.</p>
+          : <>
+              <SearchField autoFocus label="Find a site" placeholder="Find a site…" value={picker.filter}
+                onInput={(event) => onFilter(event.currentTarget.value)} />
+              <div className="browser-import-sites" role="group" aria-label="Sites">
+                {matching.length > 1 && (
+                  <label className="browser-import-every">
+                    <input ref={everyBox} type="checkbox" checked={all} onChange={toggleMatching} />
+                    <span>{query ? "All matching" : "All sites"}</span>
+                    <em>{ticked} of {matching.length}</em>
+                  </label>
+                )}
+                {matching.slice(0, SHOWN_SITES).map((site) => (
+                  <label key={site.domain}>
+                    <input type="checkbox" checked={selected.has(site.domain)} disabled={full && !selected.has(site.domain)} onChange={() => onToggle(site.domain)} />
+                    <span>{site.domain}</span>
+                    <em>{site.cookies} {site.cookies === 1 ? "cookie" : "cookies"}</em>
+                  </label>
+                ))}
+                {matching.length === 0 && <p className="browser-import-quiet">No site matches.</p>}
+              </div>
+              {matching.length > SHOWN_SITES && <p className="browser-import-quiet">Showing {SHOWN_SITES} of {matching.length}. Search to find the rest.</p>}
+            </>}
+      <div className="browser-import-actions">
+        <Button onClick={onCancel} disabled={importing}>Cancel</Button>
+        <Button variant="primary" onClick={onRun} disabled={importing || count === 0} aria-busy={importing || undefined}>
+          {importing ? "Importing…" : count === 0 ? "Import" : `Import ${count} ${count === 1 ? "site" : "sites"}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function SourceRow({ source, sources, settings }: { source: BrowserImportSource; sources: BrowserImportSource[]; settings: BrowserImportSettings }) {
+  const { state } = settings;
+  const picking = state.picker?.sourceId === source.id;
+  const last = state.last?.sourceId === source.id ? state.last : null;
+  const shown = sources.filter((item) => item.browser === source.browser).length > 1;
+  const choose = useRef<HTMLButtonElement>(null);
+  const wasPicking = useRef(picking);
+  useEffect(() => {
+    const active = document.activeElement;
+    if (wasPicking.current && !picking && (!active || active === document.body)) choose.current?.focus();
+    wasPicking.current = picking;
+  }, [picking]);
+  return (
+    <>
+      <SettingRowBase className="browser-import-source" leading={<SettingStatus done={Boolean(last)} quiet />} title={shown ? sourceName(source, sources) : source.browser}
+        description={last ? `Last imported ${last.sites.length === 1 ? last.sites[0] : `${last.sites.length} sites`}.` : undefined}>
+        {!picking && <>
+          {last && <Button onClick={settings.onAgain} disabled={state.importing} aria-busy={state.importing || undefined} icon={<SpinningIcon icon={Again} spinning={state.importing} size={12} aria-hidden="true" />}>{state.importing ? "Importing…" : "Import again"}</Button>}
+          <Button ref={choose} onClick={() => settings.onChoose(source.id)} disabled={state.importing}>Choose sites</Button>
+        </>}
+      </SettingRowBase>
+      {picking && state.picker && (
+        <SitePicker picker={state.picker} importing={state.importing} onToggle={settings.onToggle} onFilter={settings.onFilter}
+          onRun={settings.onRun} onCancel={() => settings.onChoose(null)} />
+      )}
+    </>
+  );
+}
+
+/** Copies another browser's sign-ins for the sites the user picks, and repeats that on request. */
+export function BrowserImportSection({ settings }: { settings: BrowserImportSettings }) {
+  const { state, onRead } = settings;
+  useEffect(() => { onRead(); }, []);
+
+  return (
+    <SettingsSection setting="browser.import" description="Copy sign-ins from another browser for the sites you pick. Passwords are never copied.">
+      {state.notice && <p className="browser-import-notice" role="status">{state.notice}</p>}
+      {state.error && <p className="settings-error" role="alert">{state.error}</p>}
+
+      {state.sources === null
+        ? <p className="settings-empty">Looking for browsers…</p>
+        : state.sources.length === 0
+          ? <p className="settings-empty">No other browsers found on this computer.</p>
+          : state.sources.map((source) => <SourceRow key={source.id} source={source} sources={state.sources!} settings={settings} />)}
+    </SettingsSection>
+  );
+}

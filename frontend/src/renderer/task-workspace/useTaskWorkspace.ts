@@ -1,0 +1,124 @@
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { promptKey } from "../../application/workspace-state";
+import { deriveView } from "../../application/workspace-view";
+import { viewPreferences, writeViewPreferences } from "../../application/view-preferences";
+import type { ThreadHandleOption } from "../../domain/thread-handles";
+import { threadHandleOptions } from "../../application/thread-projection";
+import type { WorkspaceInput } from "../../application/workspace-reducer";
+import type { AppCommand } from "../../contracts/commands";
+import { applyTheme } from "../theme";
+import { applyTypography } from "../typography";
+import { threadNamesOf } from "../thread-names";
+import { workspaceActions } from "./workspace-actions";
+import { useWorkspaceSubscriptions } from "./workspace-subscriptions";
+import { createWorkspaceConnection } from "./workspace-connection";
+import { computerCommandAvailable, createComputerCapabilitySnapshot } from "../../application/computers";
+
+function sameKeys(previous: object, next: object) {
+  const keys = Object.keys(next);
+  return keys.length === Object.keys(previous).length && keys.every((key) => Object.hasOwn(previous, key));
+}
+
+/** Compares what the `@` menu draws and inserts: id, handle, title, project, scope and running, in order. `lastActivityAt` only orders the list. */
+function sameHandles(before: ThreadHandleOption[], next: ThreadHandleOption[]) {
+  return before.length === next.length && before.every((option, index) => {
+    const other = next[index]!;
+    return option.id === other.id && option.handle === other.handle && option.title === other.title
+      && option.project === other.project && option.inScope === other.inScope && option.running === other.running;
+  });
+}
+
+/** A view subscribes to the application runtime and sends it commands. */
+export function useTaskWorkspace() {
+  const held = useRef<ReturnType<typeof createWorkspaceConnection> | null>(null);
+  if (!held.current) held.current = createWorkspaceConnection();
+  const runtime = held.current;
+  const state = useSyncExternalStore(runtime.subscribe, runtime.getState);
+  useEffect(() => { void runtime.start(); return () => runtime.dispose(); }, [runtime]);
+  const displayed = useRef(state);
+  displayed.current = state;
+  useWorkspaceSubscriptions({ restored: state.restored, dispatch: runtime.dispatch, displayedState: () => displayed.current });
+  const view = useMemo(() => deriveView(state), [state]);
+
+  /** Held still across renders, so a memoized view is not redrawn by a handler that only looks new. */
+  const dispatchCommand = useCallback((command: AppCommand) => runtime.dispatch(command), []);
+  const dispatchInput = useCallback((input: WorkspaceInput) => runtime.dispatch(input), []);
+  const actions = useMemo(() => workspaceActions(dispatchInput), [dispatchInput]);
+  const capabilitySnapshot = useMemo(createComputerCapabilitySnapshot, []);
+  const capabilityRevision = capabilitySnapshot(state.computers);
+  const commandControls = useMemo(() => ({
+    available: (command: AppCommand) => computerCommandAvailable(runtime.getState(), command),
+    dispatch: dispatchCommand,
+  }), [capabilityRevision, dispatchCommand]);
+
+  /**
+   * The `@` menu's threads, per draft, since which threads are in scope depends on the draft. The
+   * cache outlives one state so a menu whose threads did not move is handed back the same list, and
+   * a surface holding that list is not redrawn by a change it never reads.
+   */
+  const handleCache = useRef<{ inputs: readonly unknown[]; activeRuns: object; byDraft: Map<string, ThreadHandleOption[]>; stale: Map<string, ThreadHandleOption[]> }>({ inputs: [], activeRuns: {}, byDraft: new Map(), stale: new Map() });
+  const threadHandlesFor = useCallback((draftKey: string) => {
+    const current = runtime.getState();
+    const inputs = [current.threads, current.projects, current.sideChats, current.pendingRuns, current.queuedMessages, current.draftProjectId] as const;
+    const cache = handleCache.current;
+    /** Handles read which threads are running, never a run's sequence or status. */
+    const runsChanged = cache.activeRuns !== current.activeRuns && !sameKeys(cache.activeRuns, current.activeRuns);
+    cache.activeRuns = current.activeRuns;
+    if (runsChanged || inputs.some((value, index) => cache.inputs[index] !== value)) {
+      cache.inputs = inputs;
+      cache.stale = cache.byDraft;
+      cache.byDraft = new Map();
+    }
+    const known = cache.byDraft.get(draftKey);
+    if (known) return known;
+    const fresh = threadHandleOptions(current, draftKey);
+    /** A change none of the menu's rows show, such as a new message, hands back the list from before it. */
+    const previous = cache.stale.get(draftKey);
+    const options = previous && sameHandles(previous, fresh) ? previous : fresh;
+    cache.byDraft.set(draftKey, options);
+    return options;
+  }, []);
+
+  const threadNames = useRef<{ threads: readonly unknown[]; names: ReadonlyMap<string, string> }>({ threads: [], names: new Map() });
+  if (threadNames.current.threads !== state.threads) threadNames.current = { threads: state.threads, names: threadNamesOf(state.threads, threadNames.current.names) };
+
+  useEffect(() => { applyTheme(view.theme, view.themeMode === "auto"); }, [view.theme, view.themeMode]);
+
+  /**
+   * Only a window set to "auto" reads the system's appearance, and it can only read it truthfully
+   * once the platform has stopped being told which ground to use — so it re-reads after applying.
+   */
+  useEffect(() => {
+    if (view.themeMode !== "auto") return;
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!media) return;
+    const follow = () => void runtime.dispatch({ type: "view.system-scheme", dark: media.matches });
+    const settle = requestAnimationFrame(follow);
+    media.addEventListener("change", follow);
+    return () => {
+      cancelAnimationFrame(settle);
+      media.removeEventListener("change", follow);
+    };
+  }, [view.themeMode, view.theme]);
+
+  useEffect(() => {
+    applyTypography({ uiFont: view.uiFont, monoFont: view.monoFont, readingSize: view.readingSize, terminalSize: view.terminalSize });
+  }, [view.uiFont, view.monoFont, view.readingSize, view.terminalSize]);
+
+  /** The window's own copy of what it paints with, read before the host has answered at the next launch. */
+  useEffect(() => {
+    if (!state.restored) return;
+    writeViewPreferences(localStorage, viewPreferences(state));
+  }, [state.restored, view.theme, view.themeMode, view.uiFont, view.monoFont, view.readingSize, view.terminalSize]);
+
+  return {
+    ...view,
+    threadHandles: threadHandlesFor(promptKey(state)),
+    threadHandlesFor,
+    threadNames: threadNames.current.names,
+    /** The one door into the application. The named actions below are shorthand for the same commands. */
+    dispatch: dispatchCommand,
+    actions,
+    commandControls,
+  };
+}

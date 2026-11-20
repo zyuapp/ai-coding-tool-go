@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "AI Coding Tool",
+  "outputfilename": "aicodingtool",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Zhuocheng Yu",
+    "email": "zhuocheng.yu.d@gmail.com"
+  },
+  "info": {
+    "companyName": "zyuapp",
+    "productName": "AI Coding Tool",
+    "productVersion": "0.10.37",
+    "copyright": "Copyright © Zhuocheng Yu"
+  }
+}

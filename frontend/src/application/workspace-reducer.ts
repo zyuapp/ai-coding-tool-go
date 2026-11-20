@@ -1,0 +1,280 @@
+import { attachmentSendFor } from "./composer-attachments.js";
+import { apply } from "./workspace-reducer/dispatch.js";
+import { reconcileSnoozes } from "./thread-snooze.js";
+import { reconcileSimulators } from "./workspace-reducer/simulator.js";
+import { reconcileLimitPauses } from "./limit-pauses.js";
+import { reconcileAppUpdate } from "./app-updates.js";
+import { reconcileCoordination } from "./workspace-reducer/coordination.js";
+import { shownPageEffects } from "./workspace-reducer/browser-tabs.js";
+import { prunedWorkflowPanels, TAKE_KEYS, withOverviewPanels } from "./workspace-reducer/dock-tabs.js";
+import { prunedFind } from "./workspace-reducer/find.js";
+import { settledZen, zenAllowed } from "./workspace-zen.js";
+import { settledUnlisted } from "./project-commands.js";
+import { settledArchivePrompt } from "./workspace-dialogs.js";
+import { rejected, settled } from "./workspace-reducer/shared.js";
+import { computerOfThread, leavesComputer, routeInput, type InputRoute } from "./computers.js";
+import { activeComputer, selectedComputer } from "./state/computers.js";
+import { supportsComputerCommand } from "../contracts/computer-capabilities.js";
+import { clampTitle } from "../domain/thread.js";
+import type { WorkspaceEffect, WorkspaceInput, WorkspaceTransition } from "./workspace-reducer/types.js";
+import { dockFor, dockOwner, keyboardTerminalId, keyboardThreadId, recordVisit, type WorkspaceState } from "./workspace-state.js";
+import { THREAD_START_PROJECT_MENU } from "./state/dialogs.js";
+import { threadSlots } from "./workspace-view.js";
+import { findTargetFor } from "./workspace-find.js";
+import type { AppCommand } from "../contracts/commands.js";
+import type { AgentEvent } from "../contracts/ipc.js";
+import { slotShortcutIndex, type ShortcutSurface } from "../domain/shortcuts.js";
+import { defaultEffortFor, effortForModel, effortsFor, engineCatalog, threadModel } from "../domain/agent-engine.js";
+import { effortRoleOf } from "../domain/coordination.js";
+
+export type { WorkspaceEffect, WorkspaceEvent, WorkspaceInput, WorkspaceTransition } from "./workspace-reducer/types.js";
+export { coordinatorAskRefusal, WORKSPACE_ERRORS } from "./workspace-reducer/errors.js";
+export { AUTOMATION_PANEL, DIFF_PANEL, OVERVIEW_PANEL, SIMULATOR_PANEL } from "./workspace-state.js";
+
+/**
+ * The single writer for workspace state. Commands come from the UI (and, later, from anything else
+ * driving the app); events report what the outside world did back. Nothing here touches Electron.
+ */
+export function reduce(state: WorkspaceState, input: WorkspaceInput): WorkspaceTransition {
+  const transition = reduceInput(state, input);
+  const next = settledArchivePrompt(settledZen(state, transition.state));
+  return next === transition.state ? transition : { ...transition, state: next };
+}
+
+function reduceInput(state: WorkspaceState, input: WorkspaceInput): WorkspaceTransition {
+  /** A keystroke is whatever the user could have clicked, so it re-enters here as those commands. */
+  if (input.type === "view.shortcut") return runCommands(state, shortcutCommands(state, input.action, input.surface));
+  if (input.type === "view.escape") return runCommands(state, escapeCommands(state));
+  if (input.type === "view.fork-confirm") return confirmFork(state, input.title);
+  if (input.type === "view.archive-confirm") return state.archivePrompt === null ? settled(state) : reduce({ ...state, archivePrompt: null }, { type: "task.archive", taskId: state.archivePrompt });
+  /** A frame's reports, folded in arrival order so no report overtakes the one before it. */
+  if (input.type === "agent.events") {
+    return input.events.reduce<WorkspaceTransition>((transition, event) => {
+      const next = reduce(transition.state, agentEventInput(event));
+      return combineTransitions(transition, next);
+    }, settled(state));
+  }
+  const route = routeInput(state, input);
+  if (route.kind === "refuse") return rejected(state, route.message);
+  if (route.kind === "computer" && !route.also) return forwarded(state, route);
+  const carried = route.kind === "computer" ? [forwardEffect(route)] : [];
+  const left = leavingComputer(state, input);
+  const applied = reconcileSimulators(left, reconcileAppUpdate(left, reconcileCoordination(left, reconcileLimitPauses(left, reconcileSnoozes(left, apply(left, input), input), input), input)));
+  if (input.type === "preferences.loaded" && applied.state.memoryProtection !== state.memoryProtection) applied.effects.push({ type: "send-run-command", command: { type: "memory-protection", enabled: applied.state.memoryProtection } });
+  applied.effects = [...leftBehind(state, left), ...carried, ...applied.effects];
+  const transition = { ...applied, state: settledUnlisted(left, withOverviewPanels(prunedWorkflowPanels(prunedFind(applied.state)))) };
+  if (transition.state.browserOrigins !== state.browserOrigins || (input.type === "task.set-policy" && transition.state !== state) || input.type === "store.loaded" || input.type === "preferences.loaded" || transition.effects.some((effect) => ["browser.open", "browser.navigate", "browser.act", "browser.history", "browser.reload"].includes(effect.type))) {
+    transition.effects = [{ type: "browser.permissions", permissions: browserPermissions(transition.state) }, ...transition.effects];
+  }
+  if (transition.state.currentId === state.currentId) return transition;
+  if (transition.state.openMenu === "session:location" || transition.state.openMenu === THREAD_START_PROJECT_MENU) transition.state = { ...transition.state, openMenu: null };
+  /** A dock tab asked for the keys only on that visit, so coming back later finds the caret in the composer. */
+  if (transition.state.dockFocus && transition.state.dockFocus === state.dockFocus) transition.state = { ...transition.state, dockFocus: null };
+  const landed = transition.state.currentId !== null && input.type !== "view.go-back" && input.type !== "view.go-forward"
+    ? recordVisit(transition.state, transition.state.currentId)
+    : transition.state;
+  /**
+   * The dock the thread was left in comes back as it was; only the panel's own page has to follow. The
+   * keys come back to the window too, since the page they were on belongs to the thread just left.
+   */
+  return { ...transition, state: landed, effects: [...transition.effects, ...shownPageEffects(landed), ...(landed.focused ? TAKE_KEYS : [])] };
+}
+
+/**
+ * Forks under the typed name, wherever the thread is held. A paired computer whose build cannot take
+ * a name names the copy itself rather than refusing the fork over it.
+ */
+function confirmFork(state: WorkspaceState, typed: string): WorkspaceTransition {
+  const ask = state.forkName;
+  const title = clampTitle(typed);
+  if (!ask || !title) return settled(state);
+  const fork: AppCommand = { type: "task.fork", taskId: ask.taskId, ...(ask.worktree ? { worktree: true } : {}), title };
+  const holder = computerOfThread(state, ask.taskId);
+  const named = holder && !supportsComputerCommand(holder.capabilities, fork) ? { type: "task.fork" as const, taskId: ask.taskId, ...(ask.worktree ? { worktree: true } : {}) } : fork;
+  return reduce({ ...state, forkName: null }, named);
+}
+
+function forwardEffect(route: Extract<InputRoute, { kind: "computer" }>): WorkspaceEffect {
+  return { type: "computer.forward", id: route.computer.id, inputs: route.inputs, ...(route.draft ? { draft: route.draft } : {}) };
+}
+
+/**
+ * A command that moves this window to one of its own threads takes the paired computer off screen,
+ * and lets go of one waiting for its line to come back on screen.
+ */
+function leavingComputer(state: WorkspaceState, input: WorkspaceInput): WorkspaceState {
+  if ((state.computers.active === null && state.computers.dropped === null) || !leavesComputer(state, input)) return state;
+  return { ...state, computers: { ...state.computers, active: null, dropped: null } };
+}
+
+/**
+ * A computer whose thread the window has just left is told nobody here is looking any more, which
+ * is what its unread marks go by. What its own window shows is its user's, so that is left as it is.
+ */
+function leftBehind(before: WorkspaceState, after: WorkspaceState): WorkspaceEffect[] {
+  const left = activeComputer(before);
+  if (!left || after.computers.active === left.id) return [];
+  return [{ type: "computer.forward", id: left.id, inputs: [{ type: "view.set-focused", focused: false }] }];
+}
+
+/**
+ * A command on its way to the computer holding its thread. Selecting one of that computer's threads
+ * puts that computer on screen; a send carries the draft typed here, which stays until it is taken.
+ */
+function forwarded(state: WorkspaceState, route: Extract<InputRoute, { kind: "computer" }>): WorkspaceTransition {
+  let next = state;
+  const attachments = route.draft?.attachments;
+  if (attachments) {
+    const send = attachmentSendFor(state.attachmentSends, attachments.key);
+    if (send.busy) return settled(state);
+    next = { ...next, attachmentSends: { ...next.attachmentSends, [attachments.key]: { ...send, busy: true, error: null } } };
+  }
+  if (route.select) next = { ...next, computers: { ...next.computers, active: route.computer.id, dropped: null }, actionError: null };
+  return { state: next, effects: [...leftBehind(state, next), forwardEffect(route)], result: { ok: true } };
+}
+
+/** Which channel a report arrived on: a run's own, or the thread's, which outlives every run. */
+export function agentEventInput(event: AgentEvent): WorkspaceInput {
+  if (event.type === "engine.settings-reload-status") return event;
+  return "runId" in event ? { type: "run.event", event } : { type: "thread.event", event };
+}
+
+function runCommands(state: WorkspaceState, commands: AppCommand[]): WorkspaceTransition {
+  return commands.reduce<WorkspaceTransition>((transition, command) => {
+    const next = reduce(transition.state, command);
+    return combineTransitions(transition, next);
+  }, settled(state));
+}
+
+function combineTransitions(previous: WorkspaceTransition, next: WorkspaceTransition): WorkspaceTransition {
+  const combined: WorkspaceTransition = { ...next, effects: [...previous.effects, ...next.effects] };
+  if (previous.result && (previous.result.ok === false || !next.result)) combined.result = previous.result;
+  return combined;
+}
+
+/**
+ * What Esc means: the nearest layer claims it first — an overlay, then a menu, the settings sheet,
+ * the find bar — and only when none is open does it reach a run. The run it reaches is the one in
+ * the surface holding the caret, so Esc in a side chat stops that chat and never the main thread.
+ */
+export function escapeCommands(state: WorkspaceState): AppCommand[] {
+  if (state.projectAdd) return [{ type: "view.add-project-key", key: "Escape" }];
+  if (state.viewingImage) return [{ type: "image.close" }];
+  if (state.jump) return [{ type: "view.jump-close" }];
+  if (state.openMenu !== null) return [{ type: "view.set-menu", menu: null }];
+  if (state.settingsOpen || state.computerUseSetup) return [{ type: "view.set-settings-open", open: false }];
+  if (state.find) return [{ type: "view.find-close" }];
+  const taskId = keyboardThreadId(state);
+  return [taskId ? { type: "run.cancel", taskId } : { type: "run.cancel" }];
+}
+
+/**
+ * The project a new thread starts in: the one the thread on screen is in, else the one being drafted.
+ * With a paired computer's thread on screen that is its thread or draft, so the new thread starts
+ * there, in that project; its chat draft names no project, so a new one from it starts here.
+ */
+function currentProjectId(state: WorkspaceState): string | undefined {
+  const shown = selectedComputer(state)?.state ?? state;
+  const thread = shown.threads.find((item) => item.id === shown.currentId);
+  return (shown.currentId ? thread?.projectId : shown.draftProjectId) ?? undefined;
+}
+
+/**
+ * What a bound keystroke means. Only the surface it was pressed on decides between a thread and a
+ * page: everything else reads the same state the buttons do.
+ */
+export function shortcutCommands(state: WorkspaceState, action: string, surface: ShortcutSurface): AppCommand[] {
+  const projectId = currentProjectId(state);
+  const newThread: AppCommand = { type: "task.new", ...(projectId ? { projectId } : {}) };
+  /** Settings are drawn over the whole window, so a keystroke that moves the user somewhere leaves them. */
+  const leaving: AppCommand[] = state.settingsOpen || state.computerUseSetup ? [{ type: "view.set-settings-open", open: false }] : [];
+  /** Zen mode hides the sidebar and the dock, so a keystroke asking for either brings the window back first. */
+  const leavingZen: AppCommand[] = state.zen ? [{ type: "view.set-zen", zen: false }] : [];
+  /**
+   * A digit means the nth of whatever the keyboard is in. A panel view holding it counts that panel's
+   * tabs, the last of them on ⌘9 the way a browser does; anywhere else counts the sidebar's threads.
+   */
+  const slot = slotShortcutIndex(action);
+  if (slot !== null) {
+    if (state.keyboardTab !== null) return [{ type: "view.select-dock-index", index: slot === 8 ? -1 : slot }];
+    const threadId = threadSlots(state)[slot];
+    if (!threadId) return [];
+    return [...leaving, ...(state.jump ? [{ type: "view.jump-close" } as AppCommand] : []), { type: "task.select", taskId: threadId }];
+  }
+  switch (action) {
+    case "app.check-for-updates": return [{ type: "app.check-for-updates" }];
+    case "app.open-source-licenses": return [{ type: "app.open-source-licenses" }];
+    case "thread.new": return [...leaving, newThread];
+    /** A thread started on a paired computer moves no caret here, so each press asks for it, which also opens the picker afresh. */
+    case "thread.new-pick-project": return [...leaving, newThread, { type: "view.focus-composer" }, { type: "view.set-menu", menu: THREAD_START_PROJECT_MENU }];
+    case "run.cancel": return [{ type: "run.cancel" }];
+    case "run.allow":
+    case "run.deny": {
+      const taskId = keyboardThreadId(state) ?? state.currentId;
+      const active = taskId ? state.activeRuns[taskId] : undefined;
+      const approval = active ? state.approvals[active.runId] : undefined;
+      return approval ? [{ type: "run.decide", taskId: approval.taskId, runId: approval.runId, approvalId: approval.approvalId, allow: action === "run.allow" }] : [];
+    }
+    case "composer.focus": return [...(state.openMenu === null ? [] : [{ type: "view.set-menu", menu: null } as AppCommand]), { type: "view.focus-composer" }];
+    case "effort.increase":
+    case "effort.decrease": {
+      /**
+       * The thread on screen is stepped from what it runs on, which for another computer's is what
+       * that computer holds, never this window's own draft. A model or effort this build does not
+       * know has nothing to step to.
+       */
+      const shown = selectedComputer(state)?.state;
+      const source = shown ? { ...shown, keyboardTab: state.keyboardTab } : state;
+      const tabbed = keyboardThreadId(source);
+      const thread = source.threads.find((item) => item.id === (tabbed ?? source.currentId));
+      const engine = thread?.engine ?? source.draftEngine;
+      const catalog = engineCatalog(source.engineStatus);
+      const model = thread ? threadModel(catalog, thread) : source.draftModel;
+      const effort = thread ? thread.effort ?? defaultEffortFor(engine) : source.draftEffort;
+      const role = effortRoleOf(thread, source.draftRole);
+      if (model === undefined) return [];
+      const choices = effortsFor(catalog, engine, model, role);
+      const index = choices.findIndex((choice) => choice.id === effortForModel(catalog, engine, model, effort, role));
+      const next = choices[index + (action === "effort.increase" ? -1 : 1)];
+      if (index < 0 || !next) return [];
+      const command: AppCommand = { type: "task.set-effort", engine, effort: next.id };
+      if (tabbed) command.taskId = tabbed;
+      return [command];
+    }
+    /** The panel is a place the keystroke takes you to and back from, so the same keys close it. */
+    case "thread.jump": return state.jump ? [{ type: "view.jump-close" }] : [...leaving, { type: "view.jump-open" }];
+    case "project.start": return [...leaving, ...(state.jump ? [{ type: "view.jump-close" } as AppCommand] : []), { type: "project.open", start: true }];
+    /** A bar that is already open is the one being asked for again, so it keeps what it was searching. */
+    case "find.open": return [state.find ? { type: "view.find-open" } : { type: "view.find-open", target: findTargetFor(state, surface) }];
+    case "find.next":
+    case "find.previous": {
+      const delta = action === "find.next" ? 1 as const : -1 as const;
+      return state.find ? [{ type: "view.find-step", delta }] : [{ type: "view.find-open", target: findTargetFor(state, surface) }];
+    }
+    case "nav.back": return surface === "browser" ? [{ type: "browser.go", delta: -1 }] : [...leaving, { type: "view.go-back" }];
+    case "nav.forward": return surface === "browser" ? [{ type: "browser.go", delta: 1 }] : [...leaving, { type: "view.go-forward" }];
+    case "page.reload": return [{ type: "browser.reload" }];
+    case "tab.new": return [...leavingZen, { type: "view.new-tab" }];
+    /**
+     * A shell is asked for, not a second one: the dock's newest answers before a new one is spun up.
+     * The shell that already has the keyboard is one the user is done with, so it goes away instead.
+     */
+    case "terminal.focus": {
+      const shown = selectedComputer(state)?.state ?? state;
+      if (keyboardTerminalId(shown)) return [{ type: "view.set-dock-open", open: false }, { type: "view.focus-composer" }];
+      const latest = dockFor(shown, dockOwner(shown)).terminals.at(-1);
+      return [...leaving, ...leavingZen, latest ? { type: "terminal.select", terminalId: latest.id } : { type: "terminal.open" }];
+    }
+    case "tab.close": return [{ type: "view.close-tab" }];
+    case "dock.toggle": return [...leavingZen, { type: "view.set-dock-open", open: state.zen || !dockFor(state, dockOwner(state)).open }];
+    case "dock.expand": return [...leavingZen, { type: "view.set-dock-expanded", expanded: !dockFor(state, dockOwner(state)).expanded }];
+    case "sidebar.toggle": return state.zen ? [...leavingZen, { type: "view.set-sidebar-open", open: true }] : [{ type: "view.set-sidebar-open", open: !state.sidebarOpen }];
+    case "zen.toggle": return state.zen ? leavingZen : zenAllowed(state) ? [...leaving, ...(state.jump ? [{ type: "view.jump-close" } as AppCommand] : []), { type: "view.set-zen", zen: true }] : [];
+    case "settings.toggle": return [{ type: "view.set-settings-open", open: !state.settingsOpen }];
+    default: return [];
+  }
+}
+
+export function browserPermissions(state: WorkspaceState) {
+  return { origins: state.browserOrigins, autonomousTaskIds: state.threads.filter((thread) => thread.executionPolicy === "autonomous").map((thread) => thread.id) };
+}

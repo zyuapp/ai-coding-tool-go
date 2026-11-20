@@ -1,0 +1,292 @@
+/**
+ * The phone bridge's vocabulary: how a phone is let in, where it reaches the Mac, and what the
+ * desktop settings screen says about all of it. Nothing here talks to a socket or reads the network;
+ * the main process does that and describes what it found in these terms.
+ */
+
+/** How long a pairing code stands before it is worthless. Short, because the QR is on screen. */
+export const PAIRING_CODE_TTL_MS = 2 * 60 * 1_000;
+
+/** Characters a pairing code is drawn from: Crockford base32, so 0/O and 1/I cannot be mistyped. */
+const PAIRING_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+export const PAIRING_CODE_LENGTH = 8;
+
+/** Bad codes in a row before the door shuts, and how long it stays shut. */
+export const MAX_PAIRING_FAILURES = 5;
+export const PAIRING_LOCKOUT_MS = 5 * 60 * 1_000;
+
+/** How many device tokens the Mac will hold. Past this, pairing a new phone is refused until one is revoked. */
+export const MAX_PAIRED_DEVICES = 16;
+
+/**
+ * How much of a session's outbound traffic is kept so a phone that drops resumes rather than reloads.
+ * A streaming reply commits many times a second, so the count alone would cover only seconds; the
+ * byte budget is what stops a long transcript's worth of patches from being kept per session.
+ */
+export const MOBILE_EVENT_BUFFER = 600;
+export const MOBILE_BUFFER_BYTES = 1024 * 1024;
+
+/**
+ * How much a phone's socket may hold unsent before the server stops queueing patches behind it. A
+ * phone on a weak line is handed the newest view once its line drains, not every step it missed.
+ */
+export const MOBILE_CONGESTED_BYTES = 256 * 1024;
+
+/** How many sessions one phone may hold at once. Past this the oldest is hung up on. */
+export const MAX_SESSIONS_PER_DEVICE = 4;
+
+/** How many sockets that have not yet said who they are the server will hold at once. */
+export const MAX_PENDING_SOCKETS = 32;
+
+/** How often the server pings a live session, and how long silence runs before the line is called dead. */
+export const MOBILE_PING_INTERVAL_MS = 15 * 1_000;
+export const MOBILE_DEAD_AFTER_MS = 45 * 1_000;
+
+/** The port the local server asks for first. Taken, it falls back to whatever the machine offers. */
+export const MOBILE_DEFAULT_PORT = 7737;
+
+/** The path the bridge's sockets and health check live under. */
+export const MOBILE_APP_PATH = "/m";
+
+/**
+ * Where a phone can reach the Mac. Loopback is the only bind and only works on the Mac itself;
+ * `tailscale-https` is the name Tailscale Serve answers on, with a real certificate in front of it.
+ */
+export type MobileAddressKind = "loopback" | "tailscale-https";
+
+export type MobileAddress = {
+  kind: MobileAddressKind;
+  host: string;
+  port: number;
+};
+
+/** Only Tailscale Serve terminates TLS; the local server itself never speaks HTTPS. */
+export function addressSecure(address: MobileAddress): boolean {
+  return address.kind === "tailscale-https";
+}
+
+/** The scheme, host and port a phone types, with the default port left off the way a browser does. */
+export function addressOrigin(address: MobileAddress): string {
+  const secure = addressSecure(address);
+  const scheme = secure ? "https" : "http";
+  const bare = (secure && address.port === 443) || (!secure && address.port === 80);
+  return bare ? `${scheme}://${address.host}` : `${scheme}://${address.host}:${address.port}`;
+}
+
+/** Which address the QR should carry: the one a phone can reach, then the Mac's own. */
+export function preferredAddress(addresses: MobileAddress[]): MobileAddress | null {
+  const rank: MobileAddressKind[] = ["tailscale-https", "loopback"];
+  for (const kind of rank) {
+    const match = addresses.find((address) => address.kind === kind);
+    if (match) return match;
+  }
+  return null;
+}
+
+/** Whether the server is running, and why it is not when it is not. */
+export type MobileServerStatus = "off" | "starting" | "listening" | "error";
+
+/** What a phone's own connection is doing, as the phone app draws it. */
+export type MobileConnectionState = "offline" | "connecting" | "resuming" | "live";
+
+/**
+ * A one-time code shown as a QR. It expires on its own and is spent by the first phone that trades
+ * it for a token, so a photograph of a stale screen is worth nothing.
+ */
+export type PairingCode = {
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+/** The code together with the address it is good for, which is exactly what the QR encodes. */
+export type MobilePairingOffer = {
+  code: string;
+  expiresAt: number;
+  address: MobileAddress;
+  /** The link drawn as the QR. The phone app opens it and pairs without typing anything. */
+  url: string;
+};
+
+/** What paired with this computer: the phone app, or another computer running this app. */
+export type PairedDeviceKind = "phone" | "computer";
+
+/**
+ * A device that has paired. Only the hash of its token is kept, so the file this is stored in cannot
+ * be read back into a working credential.
+ */
+export type PairedDevice = {
+  id: string;
+  kind: PairedDeviceKind;
+  /** What the device called itself when it paired. Shown in settings so the user can tell them apart. */
+  name: string;
+  /** Hex SHA-256 of the device token. The token itself is shown once, to the phone, and never stored. */
+  tokenHash: string;
+  pairedAt: number;
+  lastSeenAt: number | null;
+  /** Where a phone takes notices while the app is closed. Absent until the phone allows notifications. */
+  push?: PhonePush;
+};
+
+/** Which APNs gateway issued a push token: a debug build is given its tokens by the sandbox. */
+export type PushEnvironment = "production" | "sandbox";
+
+export type PhonePush = { token: string; environment: PushEnvironment };
+
+const PUSH_TOKEN = /^[0-9a-f]{64,200}$/;
+
+export function isPhonePush(value: unknown): value is PhonePush {
+  if (!value || typeof value !== "object") return false;
+  const push = value as Record<string, unknown>;
+  return typeof push.token === "string" && PUSH_TOKEN.test(push.token) && (push.environment === "production" || push.environment === "sandbox");
+}
+
+/** A paired device as settings draws it. The hash and the push token never leave the main process. */
+export type PairedDeviceView = Omit<PairedDevice, "tokenHash" | "push">;
+
+export function deviceView(device: PairedDevice): PairedDeviceView {
+  const { tokenHash: _secret, push: _push, ...view } = device;
+  return view;
+}
+
+/** One phone's live connection. It outlives a dropped socket long enough for that phone to resume. */
+export type MobileSession = {
+  id: string;
+  kind: PairedDeviceKind;
+  deviceId: string;
+  startedAt: number;
+  lastSeenAt: number;
+  /** The highest sequence this session has sent, which is what a resume is measured against. */
+  sequence: number;
+  connection: MobileConnectionState;
+};
+
+export type MobileSessionView = MobileSession & { deviceName: string };
+
+/** Whether Tailscale is on this machine, signed in, and serving HTTPS in front of the local server. */
+export type TailscaleState = {
+  status: "unknown" | "missing" | "unavailable" | "logged-out" | "ready";
+  /** The MagicDNS name of this machine, once Tailscale will say what it is. */
+  magicDnsName: string | null;
+  /**
+   * Whether the tailnet will issue this machine a certificate. A tailnet with HTTPS turned off says
+   * no, and serving over HTTPS is refused rather than attempted, because it hangs instead of failing.
+   */
+  certs: boolean;
+  /** Whether `tailscale serve` is currently pointed at the local server. */
+  serving: boolean;
+  error: string | null;
+};
+
+export function emptyTailscaleState(): TailscaleState {
+  return { status: "unknown", magicDnsName: null, certs: false, serving: false, error: null };
+}
+
+/** Everything the desktop settings section draws, and everything a phone bridge decision reads. */
+export type MobileServerState = {
+  enabled: boolean;
+  status: MobileServerStatus;
+  port: number | null;
+  addresses: MobileAddress[];
+  /** The address the QR points at, chosen by {@link preferredAddress}. */
+  primary: MobileAddress | null;
+  devices: PairedDeviceView[];
+  sessions: MobileSessionView[];
+  tailscale: TailscaleState;
+  /** The code on screen right now, if one has been minted and has yet to expire or be spent. */
+  pairing: MobilePairingOffer | null;
+  error: string | null;
+};
+
+export function emptyMobileServerState(): MobileServerState {
+  return {
+    enabled: false,
+    status: "off",
+    port: null,
+    addresses: [],
+    primary: null,
+    devices: [],
+    sessions: [],
+    tailscale: emptyTailscaleState(),
+    pairing: null,
+    error: null,
+  };
+}
+
+/** Failed pairing attempts from one source, and the lockout the last of them earned. */
+export type PairingAttempts = {
+  failures: number;
+  lockedUntil: number | null;
+  /** When the last of them was, which is what says a record has stopped being worth keeping. */
+  lastFailureAt: number;
+};
+
+export function noPairingAttempts(): PairingAttempts {
+  return { failures: 0, lockedUntil: null, lastFailureAt: 0 };
+}
+
+export function pairingLocked(attempts: PairingAttempts, at: number): boolean {
+  return attempts.lockedUntil !== null && at < attempts.lockedUntil;
+}
+
+/** One more wrong code. Reaching the limit shuts the door and starts the count again behind it. */
+export function registerPairingFailure(attempts: PairingAttempts, at: number): PairingAttempts {
+  const failures = attempts.failures + 1;
+  if (failures < MAX_PAIRING_FAILURES) return { failures, lockedUntil: attempts.lockedUntil, lastFailureAt: at };
+  return { failures: 0, lockedUntil: at + PAIRING_LOCKOUT_MS, lastFailureAt: at };
+}
+
+/** Whether a record still says anything: a stale part-count is worth no more than no record at all. */
+export function pairingAttemptsStale(attempts: PairingAttempts, at: number): boolean {
+  return !pairingLocked(attempts, at) && at - attempts.lastFailureAt >= PAIRING_LOCKOUT_MS;
+}
+
+function randomBytes(count: number): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(count));
+}
+
+/** Random characters from the unmistakable alphabet. The modulo bias over 32 of 256 values is none. */
+export function generatePairingCode(length = PAIRING_CODE_LENGTH): string {
+  const bytes = randomBytes(length);
+  let code = "";
+  for (const byte of bytes) code += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
+  return code;
+}
+
+export function createPairingCode(at: number, ttlMs = PAIRING_CODE_TTL_MS): PairingCode {
+  return { code: generatePairingCode(), createdAt: at, expiresAt: at + ttlMs };
+}
+
+/** Whether a code is still worth trading. Spending it is the caller's business; this only reads the clock. */
+export function pairingCodeLive(pairing: PairingCode | null, at: number): boolean {
+  return pairing !== null && at < pairing.expiresAt;
+}
+
+/** Codes are compared with a constant-time walk, so a guess learns nothing from how long it took. */
+export function pairingCodeMatches(pairing: PairingCode, code: string): boolean {
+  return constantTimeEquals(pairing.code, code.trim().toUpperCase());
+}
+
+export function constantTimeEquals(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
+}
+
+/** The scheme the phone app registers, so a camera that scans the QR opens the app. */
+const PHONE_APP_SCHEME = "aicodingtool";
+
+/**
+ * What the QR encodes: the phone app's link around where to reach the Mac and the code to trade.
+ * The code rides the fragment of the inner link, which no proxy in front of the server ever sees.
+ */
+export function pairingUrl(address: MobileAddress, code: string): string {
+  const link = `${addressOrigin(address)}/#pair=${encodeURIComponent(code)}`;
+  return `${PHONE_APP_SCHEME}://pair?link=${encodeURIComponent(link)}`;
+}
+
+export function pairingOffer(address: MobileAddress, pairing: PairingCode): MobilePairingOffer {
+  return { code: pairing.code, expiresAt: pairing.expiresAt, address, url: pairingUrl(address, pairing.code) };
+}

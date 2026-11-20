@@ -1,0 +1,119 @@
+import { Fragment, useEffect, useId, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
+import { LuSettings as Settings } from "react-icons/lu";
+import type { JumpRow, JumpView } from "../../application/workspace-jump";
+import type { SettingsSection } from "../../domain/settings-section";
+import { useFocusReturn } from "../focus";
+import { Button } from "../ui/Button";
+import { SearchField } from "../ui/Field";
+import { Kbd } from "../ui/Kbd";
+import "../ui/glass.css";
+import { ThreadEngineIcon } from "./ThreadEngineIcon";
+
+/** What the panel asks of the workspace, which is every command it can send. */
+export type ThreadJumpActions = {
+  setJumpQuery: (query: string) => unknown;
+  stepJump: (delta: -1 | 1) => unknown;
+  chooseJump: (threadId: string) => unknown;
+  chooseJumpSetting: (section: SettingsSection, settingId: string | null) => unknown;
+  closeJump: () => unknown;
+};
+
+export type ThreadJumpProps = { jump: JumpView; actions: ThreadJumpActions };
+
+/** The list of threads and settings a name matches, with one row picked and ready for the Enter key. */
+export function ThreadJump({ jump, actions }: ThreadJumpProps) {
+  const input = useRef<HTMLInputElement>(null);
+  const picked = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  useFocusReturn(input);
+
+  useEffect(() => {
+    picked.current?.scrollIntoView({ block: "nearest" });
+  }, [jump.index]);
+
+  const chosen = jump.options[jump.index];
+
+  function choose(option: JumpRow) {
+    if (option.kind === "thread") actions.chooseJump(option.id);
+    else actions.chooseJumpSetting(option.section, option.settingId);
+  }
+
+  function keyDown(event: ReactKeyboardEvent) {
+    if (event.key === "ArrowDown") actions.stepJump(1);
+    else if (event.key === "ArrowUp") actions.stepJump(-1);
+    else if (event.key === "Enter") { if (!chosen) return; choose(chosen); }
+    else if (event.key === "Escape") actions.closeJump();
+    else return;
+    event.preventDefault();
+  }
+
+  /** Where the settings start, so the list can say so once rather than tagging every row. */
+  const firstSetting = jump.options.findIndex((option) => option.kind === "setting");
+
+  return createPortal(
+    <div
+      className="thread-jump"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Jump to a thread or a setting"
+      onPointerDown={(event) => { if (event.target === event.currentTarget) actions.closeJump(); }}
+    >
+      <div className="glass-overlay thread-jump-panel" onKeyDown={keyDown}>
+        <SearchField
+          variant="palette"
+          wrapClassName="thread-jump-search"
+          label="Search threads and settings"
+          type="text"
+          ref={input}
+          value={jump.query}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={jump.options.length > 0}
+          aria-controls={listId}
+          aria-activedescendant={chosen ? `${listId}-${jump.index}` : undefined}
+          placeholder="Search threads, pull requests, and settings"
+          spellCheck={false}
+          onInput={(event) => actions.setJumpQuery(event.currentTarget.value)}
+        />
+        {jump.options.length ? (
+          <div id={listId} className="thread-jump-list" role="listbox" aria-label="Threads and settings">
+            {jump.options.map((option, index) => (
+              <Fragment key={option.id}>
+                {index === 0 && firstSetting !== 0 && <p className="thread-jump-heading" role="presentation">Threads</p>}
+                {index === firstSetting && <p className="thread-jump-heading" role="presentation">Settings</p>}
+                <button
+                  ref={index === jump.index ? picked : undefined}
+                  id={`${listId}-${index}`}
+                  type="button"
+                  tabIndex={-1}
+                  role="option"
+                  aria-selected={index === jump.index}
+                  className={`thread-jump-row ${index === jump.index ? "picked" : ""}`.trimEnd()}
+                  onClick={() => choose(option)}
+                >
+                  {option.kind === "thread"
+                    ? <ThreadEngineIcon engine={option.engine} className="thread-jump-engine" size={14} />
+                    : <Settings className="thread-jump-engine" size={14} role="img" aria-label="Setting" />}
+                  <span className="thread-jump-title">{option.title}</span>
+                  {option.kind === "thread" && option.running && <span className="task-spinner" role="img" aria-label="Working" />}
+                  {option.kind === "thread" && option.namedPullRequest !== null && <span className="thread-jump-pull-request">#{option.namedPullRequest}</span>}
+                  {option.kind === "thread"
+                    ? option.project && <span className="thread-jump-project">{option.project}</span>
+                    : option.page && <span className="thread-jump-project">{option.page}</span>}
+                </button>
+              </Fragment>
+            ))}
+          </div>
+        ) : (
+          <div className="thread-jump-empty">
+            <p>No matches</p>
+            {jump.query && <Button variant="soft" onClick={() => { actions.setJumpQuery(""); input.current?.focus(); }}>Clear search</Button>}
+          </div>
+        )}
+        <div className="thread-jump-foot" aria-hidden="true"><span><Kbd size="inline" keys={["↑↓"]} />Move</span><span><Kbd size="inline" keys={["↵"]} />Open</span><span><Kbd size="inline" keys={["esc"]} />Close</span></div>
+      </div>
+    </div>,
+    document.body,
+  );
+}

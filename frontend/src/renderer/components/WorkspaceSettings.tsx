@@ -1,0 +1,111 @@
+import { SettingsPanel } from "./SettingsPanel";
+import { displayShortcut } from "../../domain/shortcuts";
+import { platformCapabilities } from "../platform";
+import { dictationBinding } from "./ComposerDictation";
+
+function displayBinding(binding: string | null) {
+  return binding ? displayShortcut(binding, platformCapabilities().commandKey) : null;
+}
+import { useComputerUseReads } from "../task-workspace/computer-use-reads";
+import type { useTaskWorkspace } from "../task-workspace/useTaskWorkspace";
+
+type Workspace = ReturnType<typeof useTaskWorkspace>;
+
+/** The settings sheet with every preference it reads and every command its controls dispatch. */
+export function WorkspaceSettings({ workspace, onClose }: { workspace: Workspace; onClose: () => void }) {
+  useComputerUseReads(workspace.computerUsePermissions, workspace.actions.readComputerUse);
+
+  return (
+    <SettingsPanel
+      onClose={onClose}
+      section={workspace.settingsSection ?? "general"}
+      settingMark={workspace.settingsFocus}
+      onLand={(section, settingId) => void workspace.actions.openSettingsSection(section, settingId)}
+      archivedThreads={workspace.archivedThreads}
+      cli={workspace.cli}
+      onReadCli={() => void workspace.actions.readCli()}
+      onSetCliInstalled={(installed) => void workspace.actions.setCliInstalled(installed)}
+      planUsage={workspace.planUsage}
+      computerUsage={workspace.computerUsage}
+      usageComputer={workspace.usageComputer}
+      onSelectUsageComputer={(computerId) => void workspace.dispatch({ type: "view.set-usage-computer", computerId })}
+      onReadPlanUsage={() => void workspace.actions.readPlanUsage()}
+      computerUseAccess={workspace.computerUsePermissions}
+      onEnableComputerUse={(permission) => void workspace.actions.enableComputerUse(permission)}
+      onRestartForComputerUse={() => void workspace.actions.restartForComputerUse()}
+      worktreeSettings={workspace.worktreeSettings} worktreeManagementError={workspace.worktreeManagementError} worktreeManagementNotice={workspace.worktreeManagementNotice}
+      theme={workspace.theme}
+      themeMode={workspace.themeMode}
+      uiFont={workspace.uiFont}
+      monoFont={workspace.monoFont}
+      readingSize={workspace.readingSize}
+      terminalSize={workspace.terminalSize}
+      allowedOrigins={workspace.browserOrigins}
+      chromeBrowser={workspace.chromeBrowser} computerUse={workspace.computerUse} browserTools={workspace.browserTools}
+      dictation={{
+        model: workspace.dictation.model,
+        message: workspace.dictation.message,
+        progress: workspace.dictation.progress,
+        binding: displayBinding(dictationBinding(workspace.shortcuts)),
+        onDownload: () => void workspace.dispatch({ type: "dictation.download" }),
+        onCancelDownload: () => void workspace.dispatch({ type: "dictation.cancel-download" }),
+      }}
+      memoryProtection={workspace.memoryProtection} onSetMemoryProtection={(enabled) => void workspace.actions.setMemoryProtection(enabled)}
+      notifications={workspace.notifications} remote={workspace.remote} remoteChecking={workspace.remoteChecking}
+      agentSettingsReload={workspace.agentSettingsReload} onReloadAgentSettings={() => void workspace.actions.reloadAgentSettings()}
+      engineAccess={workspace.engineAccess} engineChecking={workspace.engineChecking} engineUpdating={workspace.engineUpdating}
+      shortcuts={workspace.shortcuts}
+      capturingShortcut={workspace.capturingShortcut}
+      desktopShortcutUnavailable={workspace.desktopShortcutUnavailable}
+      onSetThemeFamily={(family) => void workspace.actions.setThemeFamily(family)}
+      onSetThemeMode={(mode) => void workspace.actions.setThemeMode(mode)}
+      onSetUiFont={(font) => void workspace.actions.setUiFont(font)}
+      onSetMonoFont={(font) => void workspace.actions.setMonoFont(font)}
+      onSetReadingSize={(size) => void workspace.actions.setReadingSize(size)}
+      onSetTerminalSize={(size) => void workspace.actions.setTerminalSize(size)}
+      onSetChromeBrowser={(enabled) => void workspace.actions.setChromeBrowser(enabled)} onSetComputerUse={(enabled) => void workspace.actions.setComputerUse(enabled)} onSetBrowserTools={(enabled) => void workspace.actions.setBrowserTools(enabled)}
+      onSetNotifications={(enabled) => void workspace.actions.setNotifications(enabled)}
+      onCheckForUpdates={() => void workspace.actions.checkForUpdates()}
+      appUpdate={{ state: workspace.appUpdate, onDownload: () => void workspace.actions.downloadUpdate(), onInstall: () => void workspace.actions.installUpdate() }}
+      onOpenSourceLicenses={() => void workspace.dispatch({ type: "app.open-source-licenses" })}
+      onRestoreThread={workspace.actions.restoreThread}
+      onClearArchive={workspace.actions.clearArchive}
+      onRefreshEngines={() => void workspace.actions.refreshEngineStatus()} onSignInEngine={(engine) => void workspace.actions.signInEngine(engine)} onUpdateEngine={(engine) => void workspace.actions.updateEngine(engine)}
+      onRefreshWorktrees={() => void workspace.actions.refreshWorktrees()} onWorktreeCommand={workspace.dispatch}
+      onClearBrowserData={() => void workspace.actions.clearBrowserData()}
+      browserImport={{
+        state: workspace.browserImport,
+        onRead: () => void workspace.actions.readBrowserImport(),
+        onChoose: (sourceId) => void workspace.actions.chooseBrowserImport(sourceId),
+        onToggle: (site) => void workspace.actions.toggleBrowserImportSite(site),
+        onFilter: (text) => void workspace.actions.filterBrowserImport(text),
+        onRun: () => void workspace.actions.runBrowserImport(),
+        onAgain: () => void workspace.actions.importBrowserAgain(),
+      }}
+      onCaptureShortcut={(action) => void workspace.actions.captureShortcut(action)}
+      onSetShortcut={(action, binding) => void workspace.actions.setShortcut(action, binding)}
+      projects={{
+        rows: workspace.projectSettings,
+        error: workspace.actionErrorPage === "projects" ? workspace.actionError : null,
+        onDismissError: () => void workspace.dispatch({ type: "view.dismiss-action-error" }),
+        onAdd: workspace.actions.openFolder,
+        onEdit: workspace.actions.editProjectOpen,
+        onRemove: workspace.actions.removeProject,
+      }}
+      computers={{
+        found: workspace.computersFound, searching: workspace.computersSearching, searchError: workspace.computersSearchError,
+        name: workspace.computerName, links: workspace.computerLinks, pairing: workspace.computerPairing,
+        onDiscover: () => void workspace.actions.discoverComputers(),
+        onPair: (host, name, code) => void workspace.actions.pairComputer(host, name, code),
+        onCancelPairing: () => void workspace.actions.cancelComputerPairing(),
+        onForget: (id) => void workspace.actions.forgetComputer(id),
+        onReconnect: (id) => void workspace.actions.reconnectComputer(id),
+        onRename: (name) => void workspace.actions.renameComputer(name),
+        onLabel: (id, name) => void workspace.actions.labelComputer(id, name),
+        upkeep: workspace.computerUpkeep,
+        onCommand: (command) => void workspace.dispatch(command),
+      }}
+      onResetShortcuts={() => void workspace.actions.resetShortcuts()} onSetRemoteEnabled={(enabled) => void workspace.actions.setRemoteEnabled(enabled)} onCreateRemotePairingCode={() => void workspace.actions.createRemotePairingCode()} onRevokeRemoteDevice={(deviceId) => void workspace.actions.revokeRemoteDevice(deviceId)} onRefreshRemote={() => void workspace.actions.refreshRemote()}
+    />
+  );
+}

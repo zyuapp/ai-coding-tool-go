@@ -1,0 +1,167 @@
+import type { ComputerCommand } from "../contracts/commands.js";
+import type { ThreadNotice } from "../contracts/ipc.js";
+import { MAX_COMPUTER_NAME, type ComputerLink, type DiscoveredComputer } from "../domain/computers.js";
+import { isCoordinator, remoteLeadOf } from "../domain/coordination.js";
+import type { SentDraft } from "./computers.js";
+import type { ComputersSliceState, PairedComputer } from "./state/computers.js";
+import { composerOf, sentElsewhereIn } from "./composer-drafts.js";
+import type { SliceTransition } from "./workspace-reducer/slice.js";
+import { announcedNotice } from "./notices.js";
+import type { WorkspaceEffect, WorkspaceInput } from "./workspace-reducer.js";
+import type { WorkspaceState } from "./workspace-state.js";
+import { frontDock } from "./workspace-dock.js";
+
+/** What the host process says about the paired computers: who is paired, and what each one's workspace now is. */
+export type ComputerEvent =
+  | { type: "computers.changed"; name: string; links: ComputerLink[] }
+  | { type: "computers.found"; found: DiscoveredComputer[] }
+  | { type: "computers.search-failed"; message: string }
+  | { type: "computers.pair-failed"; message: string }
+  /** A paired computer's whole state as it now stands. */
+  | { type: "computer.state"; id: string; state: WorkspaceState }
+  /** What a paired computer would have put on its own desktop: it judged the run news, this one only carries it. */
+  | { type: "computer.notice"; id: string; notice: ThreadNotice }
+  /** A paired computer took the draft a send carried, so this window lets go of it. */
+  | { type: "computers.forwarded"; draft: SentDraft }
+  /** The thread a paired computer says a carried command acted on, such as one it just started, for whoever asked. */
+  | { type: "computers.answered"; taskId: string };
+
+/** The host process holds the lines and the tokens, so every command here is described and never done. */
+export type ComputerEffect =
+  | { type: "computer.discover" }
+  | { type: "computer.pair"; host: string; name: string; code: string }
+  | { type: "computer.forget"; id: string }
+  /** Dials now rather than after the pause between tries. No id dials every computer that is not connected. */
+  | { type: "computer.reconnect"; id?: string }
+  /** What this computer will call itself, or a paired one, from now on. Empty goes back to the default. */
+  | { type: "computer.rename"; name: string }
+  | { type: "computer.label"; id: string; name: string }
+  /**
+   * Inputs on their way to the computer that holds the thread they are about, with the draft a send
+   * carries, or the thread a coordinator here asked for there. A `silent` one is housekeeping, whose
+   * failure is no error.
+   */
+  | { type: "computer.forward"; id: string; inputs: WorkspaceInput[]; projectAddRequest?: number; draft?: SentDraft; proposal?: { taskId: string; proposalId: string }; silent?: true };
+
+export type ComputerInput = ComputerCommand | ComputerEvent;
+
+export function isComputerInput(input: { type: string }): input is ComputerInput {
+  return input.type.startsWith("computers.") || input.type === "computer.state" || input.type === "computer.notice";
+}
+
+type ComputersTransition = SliceTransition<ComputersSliceState>;
+
+function withComputers(state: WorkspaceState, computers: Partial<WorkspaceState["computers"]>, effects: WorkspaceEffect[] = []): ComputersTransition {
+  return { patch: { computers: { ...state.computers, ...computers } }, effects };
+}
+
+/** The links as the host reports them, each keeping the state this window already holds for it. */
+function linked(state: WorkspaceState, links: ComputerLink[]): PairedComputer[] {
+  const held = new Map(state.computers.paired.map((computer) => [computer.id, computer]));
+  return links.map((link) => {
+    const known = held.get(link.id);
+    if (known && known.status === link.status && known.error === link.error && known.name === link.name && known.host === link.host && known.capabilities === link.capabilities) return known;
+    return { ...link, state: known?.state ?? null };
+  });
+}
+
+/**
+ * Which paired computer the conversation shows as the lines move. One whose line drops leaves the
+ * screen, except while its terminal is in front, which waits to restore the same shell; it comes
+ * back on screen when its line does, unless the window has moved on in the meantime.
+ */
+function onScreen(computers: WorkspaceState["computers"], paired: PairedComputer[]): Pick<WorkspaceState["computers"], "active" | "dropped"> {
+  const selected = paired.find((computer) => computer.id === computers.active);
+  if (selected) {
+    const dock = selected.state ? frontDock(selected.state).dock : null;
+    const terminalVisible = dock?.open && dock.terminals.some((terminal) => terminal.id === dock.tab);
+    return selected.status === "connected" || terminalVisible ? { active: selected.id, dropped: null } : { active: null, dropped: selected.id };
+  }
+  if (computers.active !== null) return { active: null, dropped: null };
+  const returning = paired.find((computer) => computer.id === computers.dropped);
+  if (!returning) return { active: null, dropped: null };
+  return returning.status === "connected" ? { active: returning.id, dropped: null } : { active: null, dropped: returning.id };
+}
+
+/**
+ * A line that comes back up to the computer on screen is told again whether anyone here is looking,
+ * since that computer forgot it when the line dropped. The others already take it that nobody is.
+ */
+function lookingAgain(state: WorkspaceState, paired: PairedComputer[], active: string | null): WorkspaceEffect[] {
+  const shown = paired.find((computer) => computer.id === active);
+  if (shown?.status !== "connected") return [];
+  const before = state.computers.paired.find((computer) => computer.id === shown.id);
+  if (before?.status === "connected" && state.computers.active === shown.id) return [];
+  return [{ type: "computer.forward", id: shown.id, inputs: [{ type: "view.set-focused", focused: state.focused }] }];
+}
+
+export function reduceComputers(state: WorkspaceState, input: ComputerInput): ComputersTransition {
+  const { computers } = state;
+  switch (input.type) {
+    case "computers.discover":
+      return withComputers(state, { searching: true, searchError: null }, [{ type: "computer.discover" }]);
+    case "computers.found":
+      return withComputers(state, { found: input.found, searching: false, searchError: null });
+    case "computers.search-failed":
+      return withComputers(state, { searching: false, searchError: input.message });
+    /** A pair with no code yet opens the card the code is typed into; one with a code sends it. */
+    case "computers.pair": {
+      const pairing = { host: input.host, name: input.name, busy: input.code !== "", error: null };
+      const effects: WorkspaceEffect[] = input.code ? [{ type: "computer.pair", host: input.host, name: input.name, code: input.code }] : [];
+      return withComputers(state, { pairing }, effects);
+    }
+    case "computers.pair-failed":
+      return withComputers(state, { pairing: computers.pairing ? { ...computers.pairing, busy: false, error: input.message } : null });
+    case "computers.cancel-pairing":
+      return withComputers(state, { pairing: null });
+    case "computers.forget": {
+      const active = computers.active === input.id ? null : computers.active;
+      const dropped = computers.dropped === input.id ? null : computers.dropped;
+      const filter = computers.filter === input.id ? "all" : computers.filter;
+      return withComputers(state, { active, dropped, filter }, [{ type: "computer.forget", id: input.id }]);
+    }
+    case "computers.reconnect":
+      return { effects: [input.id === undefined ? { type: "computer.reconnect" } : { type: "computer.reconnect", id: input.id }] };
+    /** The name shows at once when there is one; an empty one is the host's to fill in and announce. */
+    case "computers.rename": {
+      const name = input.name.trim().slice(0, MAX_COMPUTER_NAME);
+      return name ? withComputers(state, { name }, [{ type: "computer.rename", name }]) : { effects: [{ type: "computer.rename", name }] };
+    }
+    case "computers.label": {
+      if (!computers.paired.some((computer) => computer.id === input.id)) return {};
+      const name = input.name.trim().slice(0, MAX_COMPUTER_NAME);
+      const paired = name ? computers.paired.map((computer) => computer.id === input.id ? { ...computer, name } : computer) : computers.paired;
+      return withComputers(state, { paired }, [{ type: "computer.label", id: input.id, name }]);
+    }
+    case "computers.filter":
+      return withComputers(state, { filter: input.filter });
+    case "computers.forwarded":
+      return { edits: [sentElsewhereIn(composerOf(state), input.draft)] };
+    case "computers.answered":
+      return { result: { ok: true, taskId: input.taskId } };
+    case "computers.changed": {
+      const paired = linked(state, input.links);
+      /** A pairing that now shows up as a link is done; one that went away, or whose line dropped, takes the screen with it. */
+      const pairing = computers.pairing && paired.some((computer) => computer.host === computers.pairing?.host) ? null : computers.pairing;
+      const { active, dropped } = onScreen(computers, paired);
+      const filter = computers.filter === "all" || computers.filter === "this" || paired.some((computer) => computer.id === computers.filter) ? computers.filter : "all";
+      return withComputers(state, { name: input.name, paired, pairing, active, dropped, filter }, lookingAgain(state, paired, active));
+    }
+    case "computer.state": {
+      const computer = computers.paired.find((item) => item.id === input.id);
+      if (!computer) return {};
+      return withComputers(state, { paired: computers.paired.map((item) => item === computer ? { ...item, state: input.state } : item) });
+    }
+    /**
+     * A thread there working under a coordinator here is announced here, under that coordinator's
+     * notices, so what that computer carries of the same thread is dropped.
+     */
+    case "computer.notice": {
+      const computer = computers.paired.find((item) => item.id === input.id);
+      if (!computer) return {};
+      const lead = remoteLeadOf(computer.state?.threads.find((thread) => thread.id === input.notice.taskId));
+      if (lead && isCoordinator(state.threads.find((thread) => thread.id === lead.threadId))) return {};
+      return { effects: announcedNotice(state, input.notice) };
+    }
+  }
+}

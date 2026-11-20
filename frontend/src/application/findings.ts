@@ -1,0 +1,87 @@
+/**
+ * Where a scheduled tick meets the workspace: whether it can run at all, what a run of it raises,
+ * and what a schedule turned away says for itself. A function belongs here when it needs the whole
+ * workspace or has to tell the desktop.
+ */
+import { threadOnScreen } from "./thread-attention.js";
+import type { AutomationFire } from "../contracts/ipc.js";
+import type { FindingReport } from "../contracts/threads.js";
+import { isNews } from "../domain/attention.js";
+import { declineCount, DECLINES_BEFORE_SURFACING } from "../domain/automation.js";
+import type { Project } from "../domain/project.js";
+import type { Thread } from "../domain/thread.js";
+import { announced } from "./notices.js";
+import { usersTurn } from "./run-record.js";
+import { notifiedRun, scheduledRun } from "./run-testimony.js";
+import { threadStatus } from "./thread-activity.js";
+import type { Step } from "./workspace-reducer/slice.js";
+import { findingIn, threadsOf } from "./workspace-reducer/thread-edits.js";
+import type { WorkspaceEffect } from "./workspace-reducer.js";
+import type { WorkspaceState } from "./workspace-state.js";
+
+/** Why a tick has nowhere to run. */
+export type TickRefusal = "no-thread" | "archived" | "busy-user" | "busy-agent" | "no-workspace";
+
+/**
+ * Who the thread is working for, if anyone. Any status but idle counts, so a send still resolving, a
+ * message still queued, and a usage-limit pause all hold a tick back: a run would clear the pause.
+ */
+function whoIsBusy(state: WorkspaceState, taskId: string): "busy-user" | "busy-agent" | null {
+  if (threadStatus(state, taskId) === "idle") return null;
+  return usersTurn(state, taskId) ? "busy-user" : "busy-agent";
+}
+
+/**
+ * Why this tick cannot run, or null when it can. A thread its own user is working in is named apart
+ * from one an agent is busy in, and answered first: the two would otherwise both read as busy, and
+ * only the second is a schedule failing to get a turn.
+ */
+export function whyTickCannotRun(state: WorkspaceState, fire: AutomationFire, thread?: Thread, project?: Project): TickRefusal | null {
+  if (!thread) return "no-thread";
+  if (thread.resourceStop) return "busy-user";
+  const busy = whoIsBusy(state, fire.taskId);
+  if (busy) return busy;
+  if (thread.archivedAt !== undefined) return "archived";
+  /** A thread in a project runs in that project's checkout, so it waits until there is one. */
+  if (thread.projectId && !project?.workspaceId) return "no-workspace";
+  return null;
+}
+
+/** Only a scheduled run may raise one: a turn the user is present for answers them directly. */
+export function raisedFinding(state: WorkspaceState, report: FindingReport & { taskId: string }): Step {
+  const thread = scheduledRun(state, report.taskId) ? state.threads.find((item) => item.id === report.taskId) : undefined;
+  if (!thread) return {};
+  const raised = isNews(thread, report.key);
+  /** A thread the user is watching cannot have missed it. */
+  const seen = state.focused && threadOnScreen(state, report.taskId);
+  const next = notifiedRun(state, report.taskId, report, Date.now(), seen);
+  return { ...next, effects: raised ? announced(state, thread, report.headline, "finding") : [] };
+}
+
+/**
+ * A tick with nowhere to run is acknowledged and dropped, which the scheduler counts. A schedule
+ * turned away over and over is a silence of its own, so the thread says so out loud, once.
+ */
+export function declinedTick(state: WorkspaceState, fire: AutomationFire, thread: Thread | undefined, refusal: TickRefusal): Step {
+  const acked: WorkspaceEffect[] = [{ type: "automation.ack", ack: { automationId: fire.automationId, runId: fire.runId, started: false } }];
+  const automation = state.automations.find((item) => item.id === fire.automationId);
+  if (!thread || !automation || declineCount(automation) + 1 < DECLINES_BEFORE_SURFACING) return { effects: acked };
+  /** A thread its own user is working in is not a broken schedule: they are here, and the ticks resume when they stop. */
+  if (refusal === "busy-user") return { effects: acked };
+  const key = `declined:${automation.id}`;
+  /**
+   * Once per stretch of declines, however many the scheduler counted before the workspace saw one:
+   * ticks turned away where no reducer was listening still climb the count. A notice from an earlier
+   * stretch was about a schedule that has run since, so it does not stand in for this one.
+   */
+  const since = automation.lastRunAt ?? 0;
+  const said = !isNews(thread, key) || (thread.findings ?? []).some((finding) => finding.key === key && finding.at >= since);
+  if (said) return { effects: acked };
+  const headline = `This automation has not been able to run since ${new Date(automation.lastRunAt ?? automation.createdAt).toLocaleString()}`;
+  const report = { headline, key };
+  const seen = state.focused && threadOnScreen(state, thread.id);
+  return {
+    edits: [findingIn(threadsOf(state), thread.id, report, Date.now(), seen)],
+    effects: [...acked, ...announced(state, thread, headline, "finding")],
+  };
+}

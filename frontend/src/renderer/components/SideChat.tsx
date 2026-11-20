@@ -1,0 +1,209 @@
+import type { QuestionAddress } from "../../domain/agent-question";
+import { LuGitFork as GitFork } from "react-icons/lu";
+import { useRef, type ReactNode } from "react";
+import type { DockConversationView, SideChatView } from "../../application/workspace-view";
+import type { FindView } from "../../application/workspace-find";
+import type { ReadingPoint } from "../../contracts/commands";
+import { sentPrompts, type Annotation, type AnnotationAnchor, type AttachedFile, type PastedText } from "../../domain/conversation";
+import { defaultEffortFor, isAgentEngine, unopenableEngine, type AgentEngine, type AgentModel, type EngineModel } from "../../domain/agent-engine";
+import type { AgentEffort, ExecutionPolicy } from "../../domain/run";
+import type { ThreadHandleOption } from "../../domain/thread-handles";
+import { ApprovalCard, type ApprovalCardProps } from "./ApprovalCard";
+import { ConversationTimeline, type ConversationTimelineProps } from "./ConversationTimeline";
+import { ConversationComposer } from "./ConversationComposer";
+import type { ComposerOutbox } from "./ComposerAttachments";
+import { useFileDrop } from "../file-drop";
+import { Notice } from "../ui/Notice";
+import { PanelHeader } from "../ui/PanelHeader";
+import "../ui/glass.css";
+
+export type DockConversationProps = {
+  chat: DockConversationView;
+  /** What the engine running this chat is called. */
+  engineLabel: string;
+  /** Bumped whenever something asks this chat to take the caret. */
+  focusToken?: number;
+  /** The bar, and the match it is showing, when it is this chat's own thread being searched. */
+  find?: FindView | null;
+  findBar?: ReactNode;
+  /** The folder the thread's links resolve against, and the checkout its `@` menu lists files from. */
+  folder?: string;
+  workspaceId?: string;
+  /** Threads this chat's `@` menu offers. */
+  threads?: ThreadHandleOption[];
+  onPrompt: (prompt: string) => void;
+  onAnnotateAdd: (draft: { quote: string; note: string; anchor: AnnotationAnchor }) => void;
+  onAnnotateNote: (annotationId: string, note: string) => void;
+  onAnnotateRecall: (annotations: Annotation[]) => void;
+  onAnnotateRemove: (annotationId: string) => void;
+  onAnnotateReveal: (annotationId: string) => void;
+  onPasteAdd: (text: string) => void;
+  onPasteRecall: (pastes: PastedText[]) => void;
+  onPasteRemove: (pasteId: string) => void;
+  onFilesAdd: (files: File[]) => void;
+  onFileRecall: (files: AttachedFile[]) => void;
+  onFileRemove: (fileId: string) => void;
+  onImageRecall: (paths: string[]) => void;
+  onImageRemove: (imageId: string) => void;
+  /** Where this chat's transcript was left, and where its reader has moved to since. */
+  readingPoint?: ReadingPoint;
+  onReadingPointMove?: (point: ReadingPoint) => void;
+  onAnswerQuestion?: (question: QuestionAddress) => void;
+  onQuestionAnswerChange?: (question: QuestionAddress, text: string) => void;
+  outbox: ComposerOutbox;
+  onCancel: () => void;
+  onDecide: ApprovalCardProps["onDecide"];
+  onPolicyChange: (policy: ExecutionPolicy) => void;
+  favoriteModels?: EngineModel[];
+  onModelFavorite?: (engine: AgentEngine, model: AgentModel, favorite: boolean) => void;
+  onModelChange: (engine: AgentEngine, model: AgentModel) => void;
+  onFastModeChange: (fastMode: boolean) => void;
+  onEffortChange: (engine: AgentEngine, effort: AgentEffort) => void;
+  onEditQueued: (messageId: string) => void;
+  onSteerQueued: (messageId: string) => void;
+  onDropQueued: (messageId: string) => void;
+  /** Whether a newer build is ready to install, which is what a chat on an unknown engine needs. */
+  updateAvailable?: boolean;
+};
+
+/**
+ * A thread talked to from a dock tab: its transcript, its approval, and its composer. The tab draws
+ * its own header and says what the thread is.
+ */
+export function DockConversation({ chat, engineLabel, focusToken = 0, find = null, findBar, folder = "", workspaceId, threads, onPrompt, onAnnotateAdd, onAnnotateNote, onAnnotateRecall, onAnnotateRemove, onAnnotateReveal, onPasteAdd, onPasteRecall, onPasteRemove, onFilesAdd, onFileRecall, onFileRemove, onImageRecall, onImageRemove, readingPoint, onReadingPointMove, outbox, onAnswerQuestion, onQuestionAnswerChange, onCancel, onDecide, onPolicyChange, favoriteModels, onModelFavorite, onModelChange, onEffortChange, onFastModeChange, onEditQueued, onSteerQueued, onDropQueued, updateAvailable = false, className, label, header, empty, surface, disabled = false, error = null, note }: DockConversationProps & {
+  className: string;
+  label: string;
+  header: ReactNode;
+  empty: NonNullable<ConversationTimelineProps["empty"]>;
+  surface: "side" | "tab";
+  disabled?: boolean;
+  error?: string | null;
+  note?: string;
+}) {
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const drop = useFileDrop(onFilesAdd);
+
+  return (
+    <aside className={`${className} ${drop.over ? "dropping" : ""}`} aria-label={label} {...drop.props}>
+      {header}
+      {findBar}
+      <div className="side-chat-transcript" ref={transcriptRef}>
+        <ConversationTimeline
+          find={find}
+          currentThread={chat.thread}
+          engine={chat.thread.engine}
+          engineLabel={engineLabel}
+          folder={folder}
+          {...(workspaceId ? { workspaceId } : {})}
+          status={chat.status}
+          compacting={chat.compacting}
+          retrying={chat.retrying}
+          streamingTail={chat.streamingTail}
+          scrollContainerRef={transcriptRef}
+          readingPoint={readingPoint}
+          onReadingPointMove={onReadingPointMove}
+          annotations={chat.annotations}
+          annotationReveal={chat.annotationReveal}
+          onAnnotateAdd={onAnnotateAdd}
+          onAnnotateNote={onAnnotateNote}
+          onAnnotateRemove={onAnnotateRemove}
+          empty={empty}
+        />
+        {chat.approval && <ApprovalCard approval={chat.approval} onDecide={onDecide} />}
+      </div>
+      {error && <Notice tone="danger" className="side-chat-error">{error}</Notice>}
+      <ConversationComposer
+        taskId={chat.thread.id}
+        /** A chat on an engine only a newer build on a paired computer knows takes no typed message, as its thread does. */
+        unopenable={isAgentEngine(chat.thread.engine) ? null : unopenableEngine(chat.thread.engine)}
+        updateAvailable={updateAvailable}
+        focusToken={focusToken}
+        prompt={chat.prompt}
+        folder={folder}
+        {...(workspaceId ? { workspaceId } : {})}
+        mode={chat.thread.executionPolicy}
+        engine={chat.thread.engine}
+        engineLabel={engineLabel}
+        engineLocked
+        model={chat.model}
+        effort={chat.thread.effort ?? defaultEffortFor(chat.thread.engine)}
+        fastMode={chat.thread.fastMode ?? false}
+        onFastModeChange={onFastModeChange}
+        {...(chat.thread.contextUsage ? { contextUsage: chat.thread.contextUsage } : {})}
+        runActive={chat.running}
+        question={chat.question}
+        onAnswerQuestion={onAnswerQuestion}
+        onQuestionAnswerChange={onQuestionAnswerChange}
+        queuedMessages={chat.queuedMessages}
+        annotations={chat.annotations}
+        pastes={chat.pastes}
+        files={chat.files}
+        threads={threads ?? []}
+        images={chat.images}
+        history={sentPrompts(chat.thread.messages)}
+        surface={surface}
+        disabled={disabled}
+        onPromptChange={onPrompt}
+        onAnnotationRecall={onAnnotateRecall}
+        onAnnotationRemove={onAnnotateRemove}
+        onAnnotationReveal={onAnnotateReveal}
+        onPasteAdd={onPasteAdd}
+        onPasteRecall={onPasteRecall}
+        onPasteRemove={onPasteRemove}
+        onFilesAdd={onFilesAdd}
+        onFileRecall={onFileRecall}
+        onFileRemove={onFileRemove}
+        onImageRecall={onImageRecall}
+        onImageRemove={onImageRemove}
+        onModeChange={onPolicyChange}
+        favoriteModels={favoriteModels}
+        onModelFavorite={onModelFavorite}
+        onModelChange={onModelChange}
+        onEffortChange={onEffortChange}
+        outbox={outbox}
+        onEditQueued={onEditQueued}
+        onSteerQueued={onSteerQueued}
+        onDropQueued={onDropQueued}
+        onCancel={onCancel}
+      />
+      {drop.over && <p className="drop-hint" role="status">Drop to attach</p>}
+      {note && <p className="side-chat-note">{note}</p>}
+    </aside>
+  );
+}
+
+/** A fork of the thread on screen, asked beside it and never saved. */
+export function SideChat({ chat, sourceTitle, sourceContinued, onClose, ...props }: DockConversationProps & {
+  chat: SideChatView;
+  /** What the thread this chat forks is called, and whether it has a session for the chat to fork. */
+  sourceTitle: string;
+  sourceContinued: boolean;
+  onClose: () => void;
+}) {
+  const available = sourceContinued || Boolean(chat.thread.continuation);
+  return (
+    <DockConversation
+      {...props}
+      chat={chat}
+      error={chat.error}
+      className="side-chat"
+      label="Side chat"
+      surface="side"
+      disabled={!available}
+      header={
+        <PanelHeader
+          icon={<span className="side-chat-fork raised"><GitFork size={18} /></span>}
+          title={chat.title}
+          subtitle={`Temporary · forked from ${sourceTitle}`}
+          closeLabel="Close side chat"
+          onClose={onClose}
+        />
+      }
+      empty={{
+        icon: GitFork,
+        title: available ? "Work from a copy of this thread" : "Main context unavailable",
+        description: available ? "This conversation starts from the main thread's context, then continues on its own branch." : "Send a message in the main thread to enable this chat.",
+      }}
+    />
+  );
+}

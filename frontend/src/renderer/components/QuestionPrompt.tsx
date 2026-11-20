@@ -1,0 +1,82 @@
+import { useId, useState } from "react";
+import type { PendingQuestion } from "../../domain/agent-question";
+import { Button } from "../ui/Button";
+import { TextField } from "../ui/Field";
+import "../ui/glass.css";
+import "./question-prompt.css";
+
+export function QuestionPrompt({ question, answer, disabled = false, submitOnEnter = true, onAnswerChange, onSubmit }: {
+  question: PendingQuestion;
+  answer: string;
+  disabled?: boolean;
+  submitOnEnter?: boolean;
+  onAnswerChange: (answer: string) => void;
+  onSubmit: () => void;
+}) {
+  const id = useId();
+  const unavailable = disabled || question.submitting;
+  /** Whether the answer was typed rather than picked, so a typed answer that matches an option's label stays typed. */
+  const [typed, setTyped] = useState(false);
+  /** What was typed, kept while a picked option stands in for it as the answer. */
+  const [draft, setDraft] = useState(() => question.options.some((option) => option.label === answer) ? "" : answer);
+  const [asked, setAsked] = useState(question.id);
+  if (asked !== question.id) {
+    setAsked(question.id);
+    setTyped(false);
+    setDraft("");
+  }
+  const chosen = !typed && question.options.some((option) => option.label === answer);
+  const overridden = chosen && draft.trim() !== "";
+  return (
+    <form className="glass-float question-prompt" data-tone="accent" aria-label="Pending question" onSubmit={(event) => {
+      event.preventDefault();
+      if (!unavailable && answer.trim()) onSubmit();
+    }}>
+      <div className="question-prompt-content" aria-live="polite">
+        <div className="question-prompt-heading">
+          <strong>{question.header || "Question"}</strong>
+          <span>{question.blocking ? "Waiting for your answer" : "Working while you answer"}</span>
+        </div>
+        <p id={id}>{question.question}</p>
+        {question.options.length > 0 && <div className="question-options" role="radiogroup" aria-labelledby={id}>
+          {question.options.map((option, index) => <label className="question-option raised" key={index}>
+            <input type="radio" name={id} value={option.label} checked={chosen && answer === option.label} disabled={unavailable} onChange={() => { setTyped(false); onAnswerChange(option.label); }} onKeyDown={(event) => {
+              if (submitOnEnter && event.key === "Enter" && event.currentTarget.checked) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }} />
+            <span><strong>{option.label}</strong>{option.description && <span className="question-option-description">{option.description}</span>}</span>
+          </label>)}
+        </div>}
+      </div>
+      <div className="question-answer">
+        <TextField
+          multiline
+          label="Your answer"
+          id={`${id}-answer`}
+          value={chosen ? draft : answer}
+          className={overridden ? "overridden" : undefined}
+          rows={2}
+          placeholder={question.options.length ? "Or type your answer…" : "Type your answer…"}
+          aria-describedby={id}
+          disabled={unavailable}
+          onInput={(event) => {
+            setTyped(true);
+            setDraft(event.currentTarget.value);
+            onAnswerChange(event.currentTarget.value);
+          }}
+          onKeyDown={(event) => {
+            if (submitOnEnter && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+        />
+        <Button type="submit" variant="inverse" disabled={unavailable || !answer.trim()}>
+          {question.submitting ? "Sending…" : "Send answer"}
+        </Button>
+      </div>
+    </form>
+  );
+}

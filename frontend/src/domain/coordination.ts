@@ -1,0 +1,898 @@
+/**
+ * A coordinator and the threads it has handed work to. A thread works under a coordinator while its
+ * `parentId` names a live thread whose role is coordinator; archiving the coordinator or taking its
+ * role off lets every one of its threads stand on its own again, with nothing to undo. A thread on a
+ * paired computer works under one through its `remoteLead`, which names the coordinator here and is
+ * kept, away, while that coordinator is not live, so it is back under it once it is again.
+ */
+import { lastRunOutcome, type CaughtStart, type HeardWork, type RemoteStop, type Thread } from "./thread.js";
+import { isRemoteSender, type RemoteSender } from "./message-origin.js";
+import { wantsAttention } from "./attention.js";
+import type { AgentEffort } from "./run.js";
+import type { ThreadOutcome } from "./thread-run.js";
+import { isThreadRole, type ThreadRole } from "./thread-role.js";
+import { defaultEffortFor, defaultModelIn, effortForModel, engineHasModel, isAgentEffort, isAgentEngine, isModelId, modelEngine, modelTakesEffort, threadModel, type AgentEngine, type AgentModel, type EngineId, type ModelCatalog } from "./agent-engine.js";
+
+/** A coordinator's run delegates and changes no files; a thread under one reports back to it. */
+export type CoordinationRole = "coordinator" | "member";
+
+/** How a thread's work lands. */
+export const DELIVERIES = [
+  { id: "pull-request", label: "Pull request" },
+  { id: "commit", label: "Commits" },
+  { id: "report", label: "Report" },
+] as const;
+
+export type Delivery = (typeof DELIVERIES)[number]["id"];
+
+/** What a coordinator hands a thread with its first message: the user's own words, and what finishing means. */
+export type ThreadBrief = {
+  intent: string;
+  doneWhen: string;
+  delivers: Delivery;
+};
+
+export const COORDINATION_STATES = ["working", "blocked", "done", "failed"] as const;
+
+export type CoordinationState = (typeof COORDINATION_STATES)[number];
+
+/** Where a thread says its work stands, newest only. */
+export type CoordinationReport = {
+  state: CoordinationState;
+  summary: string;
+  at: number;
+};
+
+export type DecisionOption = {
+  label: string;
+  description?: string;
+  recommended?: true;
+};
+
+/** A choice only the user can make. It stays open until answered, whatever the runs do meanwhile. */
+export type Decision = {
+  id: string;
+  question: string;
+  context?: string;
+  options: DecisionOption[];
+  raisedAt: number;
+  answer?: string;
+  answeredAt?: number;
+};
+
+/**
+ * Something a coordinator has yet to hear about one of its threads. Urgent news reaches it without
+ * waiting for its other threads. News written during a thread's run waits for that run to end. A
+ * quiet note was waiting when the user stopped the coordinator: it is heard with the next wake but
+ * never causes one.
+ */
+export type CoordinationNote = {
+  id: string;
+  threadId: string;
+  text: string;
+  at: number;
+  urgent?: true;
+  runId?: string;
+  quiet?: true;
+};
+
+export const MAX_BRIEF_FIELD = 4_000;
+export const MAX_SUMMARY = 500;
+export const MAX_QUESTION = 300;
+export const MAX_DECISION_CONTEXT = 2_000;
+export const MAX_OPTION_LABEL = 120;
+export const MAX_OPTION_DESCRIPTION = 300;
+export const MAX_OPTIONS = 5;
+export const MAX_ANSWER = 4_000;
+/** Answered decisions are history; only the newest are kept. */
+const MAX_DECISIONS = 20;
+/** How many decisions one thread may have waiting on the user at once, so a thread raising them in a loop stops at a few. */
+export const MAX_OPEN_DECISIONS = 10;
+const MAX_NOTES = 50;
+export const MAX_PURPOSE = 200;
+export const MAX_MEMORY_NOTE = 500;
+export const MAX_MEMORY_NOTES = 30;
+/** The longest id a memory note is named by when a coordinator forgets it. */
+export const MAX_MEMORY_NOTE_ID = 200;
+export const MAX_PROPOSALS = 12;
+export const MAX_PROPOSAL_TITLE = 120;
+export const MAX_PROPOSAL_PROJECT = 4_096;
+export const MAX_PROPOSAL_COMPUTER = 256;
+/** How many of a coordinator's threads on paired computers it keeps the news it took of, beyond those still working under it. */
+const MAX_REMOTE_HEARD = 100;
+/** How many it keeps at all, so what it cannot yet tell is gone, as on a computer that never answers again, still has an end. */
+const MOST_REMOTE_HEARD = 10 * MAX_REMOTE_HEARD;
+/**
+ * The most a coordinator's purpose and notes run to as a new thread reads them, written under today's
+ * limits with room to spare, which a thread started on another computer carries.
+ */
+export const MAX_MEMORY_PROMPT = 64_000;
+
+/** The groups a coordinator's Overview sorts its threads into, by what each one needs, most pressing first. */
+export type OverviewGroup = "needs" | "review" | "working" | "done" | "resolved";
+
+export const OVERVIEW_GROUPS: readonly OverviewGroup[] = ["needs", "review", "working", "done", "resolved"];
+
+/** What folds in a coordinator's Overview: its groups of threads, and the sections below them. */
+export type OverviewSection = OverviewGroup | "memory" | "usage";
+
+const OVERVIEW_SECTIONS: readonly OverviewSection[] = [...OVERVIEW_GROUPS, "memory", "usage"];
+
+export function isOverviewSection(value: unknown): value is OverviewSection {
+  return typeof value === "string" && (OVERVIEW_SECTIONS as readonly string[]).includes(value);
+}
+
+/** How the user left one Overview section: folded or unfolded, and whether it shows every row. */
+export type OverviewFold = { open?: boolean; all?: true };
+
+export type OverviewFolds = Partial<Record<OverviewSection, OverviewFold>>;
+
+/** One thing the user wants a coordinator, and every thread it starts, to keep in mind. */
+export type MemoryNote = { id: string; text: string; at: number };
+
+/**
+ * What a coordinator keeps for the user: what it is for, and notes on how they want it to work.
+ * `revision` grows with every change, so a note added by one is named `n<revision>` and no two notes
+ * ever share a name. `heard` is the revision the coordinator's session last read, absent when it has
+ * read none. `purposeCleared` is the revision that took the purpose off, kept until one is set
+ * again, so a session that read the old one is told it is gone.
+ */
+export type CoordinatorMemory = {
+  purpose?: string;
+  purposeCleared?: number;
+  notes: MemoryNote[];
+  revision: number;
+  heard?: number;
+};
+
+/** One change to a coordinator's memory. Only the user edits a note in place; a coordinator forgets and remembers. */
+export type MemoryChange =
+  | { kind: "purpose"; purpose: string | null }
+  | { kind: "remember"; text: string }
+  | { kind: "edit"; noteId: string; text: string }
+  | { kind: "forget"; noteId: string };
+
+/**
+ * A thread a coordinator suggests rather than starts: what start_thread takes, and a short title that
+ * only labels the suggestion.
+ */
+export type ProposalRequest = {
+  title: string;
+  prompt: string;
+  brief?: ThreadBrief;
+  project?: string;
+  worktree?: boolean;
+  worktreeId?: string;
+  /** The engine to run `model` on, for a model more than one engine offers. */
+  engine?: AgentEngine;
+  model?: AgentModel;
+  effort?: AgentEffort;
+  role?: ThreadRole;
+  /** The paired computer to run it on, by its name or id. */
+  computer?: string;
+};
+
+/**
+ * Where a suggested thread starts: the project and checkout the coordinator's start resolved to when
+ * it was suggested, and the paired computer that holds them when they are not this one's.
+ */
+export type ProposalPlace = { project?: string; worktree?: boolean; worktreeId?: string; computer?: { id: string; name: string } };
+
+/**
+ * A thread a coordinator suggested, or one asked for on another computer, waiting for the user to
+ * start, allow or dismiss it. A model and effort are kept only when they were named, so one started
+ * later runs on whatever the coordinator's threads run on by then. A thread the coordinator asked for
+ * carries its brief; one a thread under it asked for names that thread in `from` instead. `named`
+ * says the title was given rather than read from the prompt, so the thread started from it keeps it
+ * as its name. `error` says why the user's last start of it failed.
+ */
+export type ThreadProposal = {
+  id: string;
+  title: string;
+  named?: true;
+  prompt: string;
+  brief?: ThreadBrief;
+  place: ProposalPlace;
+  /** The engine `model` runs on, when it was resolved to one: on another computer's thread, one this build may not know. */
+  engine?: EngineId;
+  model?: AgentModel;
+  effort?: AgentEffort;
+  role?: ThreadRole;
+  from?: string;
+  proposedAt: number;
+  error?: string;
+  /** Allowed and carried to the computer it is for, so it may have started there whatever came back. */
+  carried?: true;
+};
+
+/**
+ * What the user can tell a thread under a coordinator to do next about its pull request, most
+ * pressing first, each said to the thread in the user's own words. `name` is what a button for it
+ * is read as beside other threads' buttons: its label first, as voice control says it, then the thread.
+ */
+export const NEXT_STEPS = [
+  { id: "resolve-conflicts", label: "Resolve conflicts", name: (title: string) => `Resolve conflicts in ${title}'s pull request`, text: "The pull request has merge conflicts with its base branch. Resolve them and push." },
+  { id: "fix-ci", label: "Fix CI", name: (title: string) => `Fix CI for ${title}`, text: "The pull request's checks are failing. Find out why, fix them, and push." },
+  { id: "address-comments", label: "Address comments", name: (title: string) => `Address comments on ${title}'s pull request`, text: "The pull request has review comments asking for changes. Address each one, push, and reply on the pull request." },
+  { id: "merge", label: "Merge it", name: (title: string) => `Merge it: ${title}'s pull request`, text: "Merge the pull request." },
+  { id: "create-pull-request", label: "Create PR", name: (title: string) => `Create PR for ${title}`, text: "Open a pull request for this work." },
+] as const;
+
+export type NextStep = (typeof NEXT_STEPS)[number]["id"];
+
+export function isNextStep(value: unknown): value is NextStep {
+  return NEXT_STEPS.some((step) => step.id === value);
+}
+
+export function nextStepOf(id: NextStep): (typeof NEXT_STEPS)[number] {
+  return NEXT_STEPS.find((step) => step.id === id)!;
+}
+
+/**
+ * Whether a turn Stop all asked to end is heard quietly once it has, on this computer or another:
+ * only one that ended stopped, or without saying how. One that finished or failed on its own, before
+ * a stop that came too late or never came, is still news.
+ */
+export function endsAsStopped(ending: ThreadOutcome | undefined): boolean {
+  return ending !== "failed" && ending !== "finished";
+}
+
+export function isCoordinator(thread: Thread | undefined): boolean {
+  return thread?.role === "coordinator" && thread.archivedAt === undefined;
+}
+
+/** Whose efforts a thread's own effort menu offers, or the draft's while there is no thread: a coordinator's, for one or a draft that will be one. */
+export function effortRoleOf(thread: Thread | undefined, draftRole: ThreadRole | null): CoordinationRole | undefined {
+  return (thread ? isCoordinator(thread) : draftRole === "coordinator") ? "coordinator" : undefined;
+}
+
+/**
+ * Whether threads on paired computers may still work under this one: it is a coordinator, archived
+ * or not, or it has heard from a thread there, since taking its role off keeps those away under it
+ * rather than letting them go, so they still need letting go once it is cleared.
+ */
+export function mayLeadElsewhere(thread: Pick<Thread, "role" | "remoteHeard">): boolean {
+  return thread.role === "coordinator" || thread.remoteHeard !== undefined && Object.keys(thread.remoteHeard).length > 0;
+}
+
+/** What a coordinator's threads run on unless one is started on something else. A choice saved before engines travelled with models names none. */
+export type ThreadModelChoice = { engine?: AgentEngine; model: AgentModel; effort?: AgentEffort };
+
+/**
+ * What a coordinator's threads run on: the user's choice, else what the coordinator runs on itself,
+ * else its engine's default. An effort the model does not take moves to the nearest one it does.
+ * None while the coordinator names no model and its engine has yet to name one.
+ */
+export function threadModelOf(catalog: ModelCatalog, lead: Thread): ThreadModelChoice | undefined {
+  const saved = lead.threadModel;
+  const chosen = saved && { engine: saved.engine ?? modelEngine(catalog, saved.model, lead.engine), model: saved.model };
+  const ownModel = threadModel(catalog, lead);
+  const own = ownModel === undefined ? undefined : { engine: lead.engine, model: ownModel };
+  const fallback = defaultModelIn(catalog, lead.engine);
+  /** A model the catalogue does not hold, such as one only a newer build on a paired computer knows, is kept as it was chosen. */
+  const known = (choice: { engine: AgentEngine | undefined; model: AgentModel }): choice is EngineChoice => choice.engine !== undefined && engineHasModel(catalog, choice.engine, choice.model);
+  const choice = chosen ?? own ?? (fallback === undefined ? undefined : { engine: lead.engine, model: fallback });
+  if (choice === undefined) return undefined;
+  if (!known(choice)) return { ...(choice.engine ? { engine: choice.engine } : {}), model: choice.model, ...(saved?.model === choice.model && saved.effort ? { effort: saved.effort } : {}) };
+  const { engine, model } = choice;
+  if (!modelTakesEffort(catalog, engine, model)) return { engine, model };
+  return { engine, model, effort: effortForModel(catalog, engine, model, saved?.effort ?? lead.effort ?? defaultEffortFor(engine)) };
+}
+
+type EngineChoice = { engine: AgentEngine; model: AgentModel };
+
+/** A thread taking the coordinator role, its threads to run on what it runs on until the user picks otherwise. */
+export function asCoordinator(catalog: ModelCatalog, thread: Thread): Thread {
+  const choice = thread.threadModel ?? threadModelOf(catalog, thread);
+  return { ...thread, role: "coordinator", ...(choice ? { threadModel: choice } : {}) };
+}
+
+/** The thread itself when it is a live coordinator. */
+function coordinator(thread: Thread | undefined): Thread | undefined {
+  return isCoordinator(thread) ? thread : undefined;
+}
+
+/** The coordinator a thread works under, while that thread is still one. */
+export function coordinatorOf(threads: readonly Thread[], thread: Thread | undefined): Thread | undefined {
+  if (!thread?.parentId || thread.role === "coordinator") return undefined;
+  return coordinator(threads.find((item) => item.id === thread.parentId));
+}
+
+/**
+ * The id of the coordinator a thread names as the one it works under: its own computer's, else the
+ * one on another computer that started it, unless that one is away. Whether that is still a live
+ * coordinator is the reader's to check, wherever it is.
+ */
+export function leadIdOf(thread: Thread): string | undefined {
+  return thread.parentId ?? (thread.remoteLead?.away ? undefined : thread.remoteLead?.threadId);
+}
+
+/**
+ * The coordinator on another computer a thread works under, and, for a thread the user allowed there,
+ * which of that coordinator's suggestions it is, so the start is made once and its card settles as
+ * the thread shows up, however its answer fared.
+ */
+export type RemoteLead = RemoteSender & { proposalId?: string };
+
+/**
+ * The coordinator on another computer as a thread holds it: `away` while that coordinator is archived
+ * or has had its role taken off there, when the thread stands on its own, and `backAt`, on this
+ * computer's clock, when it last came back, before which nothing the thread did is that coordinator's news.
+ */
+export type HeldLead = RemoteLead & { away?: true; backAt?: number };
+
+/** The coordinator on another computer a thread works under, as the thread names it, unless one here outranks it. */
+export function remoteLeadOf(thread: Thread | undefined): HeldLead | undefined {
+  return thread?.remoteLead && !thread.remoteLead.away && thread.parentId === undefined && thread.role !== "coordinator" ? thread.remoteLead : undefined;
+}
+
+/** The coordinator on another computer a thread worked under until it went away, and works under again once it is back. */
+export function awayLeadOf(thread: Thread | undefined): HeldLead | undefined {
+  return thread?.remoteLead?.away && thread.parentId === undefined && thread.role !== "coordinator" ? thread.remoteLead : undefined;
+}
+
+/** Whether a thread works under a coordinator, on this computer or on the one that started it. */
+export function worksUnderCoordinator(threads: readonly Thread[], thread: Thread | undefined): boolean {
+  return coordinatorOf(threads, thread) !== undefined || remoteLeadOf(thread) !== undefined;
+}
+
+/**
+ * The threads working under a coordinator, in the order the list holds them. A list that holds
+ * another computer's threads beside this one's finds that computer's threads under it too.
+ */
+export function coordinatedThreads(threads: readonly Thread[], leadId: string): Thread[] {
+  const lead = threads.find((thread) => thread.id === leadId);
+  if (!isCoordinator(lead)) return [];
+  return threads.filter((thread) => leadIdOf(thread) === leadId && thread.archivedAt === undefined && thread.role !== "coordinator");
+}
+
+/** The threads working under each coordinator, in the order they come, which its row speaks for. */
+export function threadsByCoordinator(threads: readonly Thread[]): Map<string, Thread[]> {
+  const members = coordinatedThreadIds(threads);
+  const byLead = new Map<string, Thread[]>();
+  for (const thread of threads) {
+    if (!members.has(thread.id)) continue;
+    const leadId = leadIdOf(thread)!;
+    byLead.get(leadId)?.push(thread) ?? byLead.set(leadId, [thread]);
+  }
+  return byLead;
+}
+
+/** Every thread drawn under a coordinator rather than in a list of its own. */
+export function coordinatedThreadIds(threads: readonly Thread[]): Set<string> {
+  const leads = new Set(threads.filter(isCoordinator).map((thread) => thread.id));
+  const members = new Set<string>();
+  for (const thread of threads) {
+    const leadId = leadIdOf(thread);
+    if (leadId && leads.has(leadId) && thread.role !== "coordinator") members.add(thread.id);
+  }
+  return members;
+}
+
+/** The named threads and every thread working under the coordinators among them. */
+export function withCoordinated(threads: readonly Thread[], ids: Set<string>): Set<string> {
+  const leads = new Set(threads.filter((thread) => ids.has(thread.id) && isCoordinator(thread)).map((thread) => thread.id));
+  if (!leads.size) return ids;
+  const all = new Set(ids);
+  for (const thread of threads) {
+    const leadId = leadIdOf(thread);
+    if (leadId && leads.has(leadId) && thread.role !== "coordinator") all.add(thread.id);
+  }
+  return all;
+}
+
+/** A thread can move under a coordinator other than itself, unless it coordinates threads of its own. */
+export function canJoinCoordinator(thread: Thread, lead: Thread | undefined): lead is Thread {
+  return lead !== undefined && isCoordinator(lead) && lead.id !== thread.id && thread.role !== "coordinator" && thread.archivedAt === undefined;
+}
+
+export function openDecisions(thread: Thread): Decision[] {
+  return (thread.decisions ?? []).filter((decision) => decision.answer === undefined);
+}
+
+/** Whether a thread already has as many decisions waiting on the user as it may, so another one is refused. */
+export function decisionsFull(thread: Thread): boolean {
+  return openDecisions(thread).length >= MAX_OPEN_DECISIONS;
+}
+
+/**
+ * What a thread's Needs-you card holds waiting on the user, apart from the approvals its runs wait
+ * on: decisions, suggested threads, and requests to run one on another computer, by its name.
+ */
+export type WaitingOnUser = { decisions: number; suggestions: number; requests: readonly string[]; blocked: number; failed: number };
+
+/**
+ * What waits on the user from a thread and the threads under it, as its Needs-you card holds it: the
+ * decisions they put to the user, the threads it suggested, and those asked for on another computer.
+ * One already starting waits on no one. Its row's mark, its place in the activity lists and the
+ * phone's all read this one count. Approvals wait on a run, and are counted where runs are.
+ *
+ * The threads under it left blocked or failed count too, as the Overview files them under Needs you,
+ * unless a decision already stands for them, until the user dismisses how they ended, read or not.
+ */
+export function waitingOnUser(thread: Thread, members: readonly Thread[], starting: readonly string[]): WaitingOnUser {
+  const proposals = (thread.proposals ?? []).filter((proposal) => !starting.includes(proposal.id));
+  const stuck = members.flatMap((member) => member.resolvedAt === undefined && !member.runOpen && wantsAttention(member) && !openDecisions(member).length ? [stuckVerdict(member)?.state] : []);
+  return {
+    decisions: [thread, ...members].reduce((count, item) => count + openDecisions(item).length, 0),
+    suggestions: proposals.filter((proposal) => !proposal.place.computer).length,
+    requests: proposals.flatMap((proposal) => proposal.place.computer ? [proposal.place.computer.name] : []),
+    blocked: stuck.filter((state) => state === "blocked").length,
+    failed: stuck.filter((state) => state === "failed").length,
+  };
+}
+
+/** Whether anything waits on the user from a thread and the threads under it. */
+export function isWaitingOnUser(waiting: WaitingOnUser): boolean {
+  return waiting.decisions + waiting.suggestions + waiting.requests.length + waiting.blocked + waiting.failed > 0;
+}
+
+/** Every decision waiting on the user from a coordinator and the threads under it, wherever each is held, oldest first. */
+export function coordinationDecisions(lead: Thread, members: readonly Thread[]): Array<{ thread: Thread; decision: Decision }> {
+  if (!isCoordinator(lead)) return [];
+  return [lead, ...members]
+    .flatMap((thread) => openDecisions(thread).map((decision) => ({ thread, decision })))
+    .sort((left, right) => left.decision.raisedAt - right.decision.raisedAt);
+}
+
+/** How a thread's latest turn left it stuck and in need of the user. */
+export type StuckVerdict = { state: "blocked" | "failed"; summary: string | null };
+
+/**
+ * Whether a thread's latest turn left it stuck: blocked or failed as it reported, or failed as the
+ * turn ended when it reported nothing about where its work ended up.
+ */
+export function stuckVerdict(thread: Thread): StuckVerdict | null {
+  const report = thread.report?.state === "working" ? undefined : thread.report;
+  if (report) return report.state === "blocked" || report.state === "failed" ? { state: report.state, summary: report.summary } : null;
+  return lastRunOutcome(thread) === "failed" ? { state: "failed", summary: null } : null;
+}
+
+/**
+ * Resolved means nothing is left for the user, so a resolved thread that has just been left stuck,
+ * by its report or by its turn failing, is open again. Whatever opened the turn, it is the user's.
+ */
+export function reopenedIfStuck(thread: Thread): Thread {
+  if (thread.resolvedAt === undefined || !stuckVerdict(thread)) return thread;
+  const { resolvedAt: _reopened, ...open } = thread;
+  return open;
+}
+
+/** A thread's report belongs to the turn that made it, so a turn that starts takes it off. */
+export function withoutReport(thread: Thread): Thread {
+  if (!thread.report) return thread;
+  const { report: _superseded, ...rest } = thread;
+  return rest;
+}
+
+export function withDecision(thread: Thread, decision: Decision): Thread {
+  const kept = [...thread.decisions ?? [], decision];
+  const answered = kept.filter((item) => item.answer !== undefined);
+  const excess = Math.max(0, kept.length - MAX_DECISIONS);
+  const dropped = new Set(answered.slice(0, excess).map((item) => item.id));
+  return { ...thread, decisions: kept.filter((item) => !dropped.has(item.id)) };
+}
+
+export function withAnswer(thread: Thread, decisionId: string, answer: string, at: number): Thread {
+  return {
+    ...thread,
+    decisions: (thread.decisions ?? []).map((decision) => decision.id === decisionId ? { ...decision, answer, answeredAt: at } : decision),
+  };
+}
+
+/** A decision whose answer never reached the thread is open again, to be answered anew. */
+export function withoutAnswer(thread: Thread, decisionId: string): Thread {
+  if (!thread.decisions?.some((decision) => decision.id === decisionId && decision.answer !== undefined)) return thread;
+  return {
+    ...thread,
+    decisions: thread.decisions.map((decision) => {
+      if (decision.id !== decisionId) return decision;
+      const { answer: _unsent, answeredAt: _answered, ...open } = decision;
+      return open;
+    }),
+  };
+}
+
+/**
+ * A coordinator's memory with one change made, or why it cannot be. A change that alters nothing
+ * hands the thread back as it was. `heard` says the coordinator made the change itself, so its
+ * session knows of it, which counts only when that session had read everything before it.
+ */
+export function withMemoryChange(thread: Thread, change: MemoryChange, at: number, { heard }: { heard: boolean }): { thread: Thread; noteId?: string } | { error: string } {
+  /** A coordinator with nothing in memory has, in effect, read all of it. */
+  const memory: CoordinatorMemory = thread.memory ?? { notes: [], revision: 0, heard: 0 };
+  const revision = memory.revision + 1;
+  let { purpose, purposeCleared, notes } = memory;
+  let noteId: string | undefined;
+  switch (change.kind) {
+    case "purpose": {
+      const asked = change.purpose?.trim() ?? "";
+      if (asked.length > MAX_PURPOSE) return { error: `A purpose can be at most ${MAX_PURPOSE} characters.` };
+      if (asked === (purpose ?? "")) return { thread };
+      purpose = asked || undefined;
+      purposeCleared = purpose ? undefined : revision;
+      break;
+    }
+    case "remember": {
+      const text = noteText(change.text);
+      if ("error" in text) return text;
+      if (notes.length >= MAX_MEMORY_NOTES) return { error: `Memory holds at most ${MAX_MEMORY_NOTES} notes. Forget one first.` };
+      noteId = `n${revision}`;
+      notes = [...notes, { id: noteId, text: text.text, at }];
+      break;
+    }
+    case "edit": {
+      const note = notes.find((item) => item.id === change.noteId);
+      if (!note) return { error: `No note has the ID ${change.noteId}.` };
+      const text = noteText(change.text);
+      if ("error" in text) return text;
+      if (text.text === note.text) return { thread };
+      noteId = note.id;
+      notes = notes.map((item) => item === note ? { ...item, text: text.text, at } : item);
+      break;
+    }
+    case "forget": {
+      if (!notes.some((item) => item.id === change.noteId)) return { error: `No note has the ID ${change.noteId}.` };
+      noteId = change.noteId;
+      notes = notes.filter((item) => item.id !== change.noteId);
+      break;
+    }
+  }
+  /** A memory the session had not finished reading stays unread, whoever changed it. */
+  const read = heard && memory.heard === memory.revision ? revision : memory.heard;
+  const changed: CoordinatorMemory = {
+    ...(purpose ? { purpose } : {}),
+    ...(purposeCleared === undefined ? {} : { purposeCleared }),
+    notes,
+    revision,
+    ...(read === undefined ? {} : { heard: read }),
+  };
+  return { thread: { ...thread, memory: changed }, ...(noteId ? { noteId } : {}) };
+}
+
+function noteText(value: string): { text: string } | { error: string } {
+  const text = value.trim();
+  if (!text) return { error: "A note needs some text." };
+  if (text.length > MAX_MEMORY_NOTE) return { error: `A note can be at most ${MAX_MEMORY_NOTE} characters.` };
+  return { text };
+}
+
+/** The coordinator's session has read its memory as it stands. */
+export function withMemoryHeard(lead: Thread): Thread {
+  const memory = lead.memory;
+  return memory && memory.heard !== memory.revision ? { ...lead, memory: { ...memory, heard: memory.revision } } : lead;
+}
+
+/** The coordinator's session can no longer be trusted to hold its memory, as after its context was compacted. */
+export function withMemoryUnheard(thread: Thread): Thread {
+  if (thread.memory?.heard === undefined) return thread;
+  const { heard: _read, ...memory } = thread.memory;
+  return { ...thread, memory };
+}
+
+/** A coordinator with more suggestions waiting, as many as there is room for; the ones already waiting stay first. */
+export function withProposals(lead: Thread, proposals: readonly ThreadProposal[]): Thread {
+  const held = lead.proposals ?? [];
+  const added = proposals.slice(0, Math.max(0, MAX_PROPOSALS - held.length));
+  return added.length ? { ...lead, proposals: [...held, ...added] } : lead;
+}
+
+/**
+ * A coordinator that has taken a thread on another computer's news up to `at`, on that computer's
+ * clock. Past the limit the oldest go first, so a coordinator that lives long never carries every
+ * thread it had, but never one of `led`, the threads still working under it: one forgotten would be
+ * heard all over again. Past a much higher one even those go, oldest first.
+ */
+export function withRemoteHeard(lead: Thread, threadId: string, at: number, led: ReadonlySet<string>): Thread {
+  const held = lead.remoteHeard ?? {};
+  if (held[threadId] === at) return lead;
+  const entries = Object.entries({ ...held, [threadId]: at });
+  if (entries.length <= MAX_REMOTE_HEARD) return { ...lead, remoteHeard: Object.fromEntries(entries) };
+  const oldest = (kept: (id: string) => boolean) => entries.filter(([id]) => id !== threadId && kept(id)).sort((left, right) => left[1] - right[1]).map(([id]) => id);
+  const dropped = new Set(oldest((id) => !led.has(id)).slice(0, entries.length - MAX_REMOTE_HEARD));
+  const left = entries.length - dropped.size;
+  if (left > MOST_REMOTE_HEARD) for (const id of oldest((id) => !dropped.has(id)).slice(0, left - MOST_REMOTE_HEARD)) dropped.add(id);
+  return { ...lead, remoteHeard: Object.fromEntries(entries.filter(([id]) => !dropped.has(id))) };
+}
+
+/** A coordinator with the named suggestions gone, started or dismissed. */
+export function withoutProposals(lead: Thread, ids: ReadonlySet<string>): Thread {
+  const held = lead.proposals ?? [];
+  const rest = held.filter((proposal) => !ids.has(proposal.id));
+  if (rest.length === held.length) return lead;
+  if (rest.length) return { ...lead, proposals: rest };
+  const { proposals: _gone, ...thread } = lead;
+  return thread;
+}
+
+/** A suggestion with why its last start failed, or with that cleared for another try. */
+export function withProposalError(lead: Thread, id: string, error: string | undefined): Thread {
+  const proposal = lead.proposals?.find((item) => item.id === id);
+  if (!proposal || proposal.error === error) return lead;
+  const { error: _cleared, ...rest } = proposal;
+  const marked: ThreadProposal = error === undefined ? rest : { ...rest, error };
+  return { ...lead, proposals: lead.proposals!.map((item) => item === proposal ? marked : item) };
+}
+
+/** A request allowed and carried to the computer it is for, which no later refusal here takes back. */
+export function withProposalCarried(lead: Thread, id: string): Thread {
+  const proposal = lead.proposals?.find((item) => item.id === id);
+  if (!proposal || proposal.carried) return lead;
+  return { ...lead, proposals: lead.proposals!.map((item) => item === proposal ? { ...proposal, carried: true as const } : item) };
+}
+
+/**
+ * A coordinator holds only so many notes it has yet to hear. Past that, the thread with the most
+ * gives up its oldest, so a thread that floods its coordinator crowds out its own news and never
+ * what another thread had to say. Its news that cannot wait goes last, once it has nothing else left.
+ */
+export function withCoordinationNote(lead: Thread, note: CoordinationNote): Thread {
+  const notes = [...lead.coordinationNotes ?? [], note];
+  while (notes.length > MAX_NOTES) notes.splice(notes.indexOf(leastNews(notes)), 1);
+  return { ...lead, coordinationNotes: notes };
+}
+
+/** The busiest thread's oldest note that can wait, else its oldest; the earliest to have written first among equals. */
+function leastNews(notes: readonly CoordinationNote[]): CoordinationNote {
+  const counts = new Map<string, number>();
+  for (const note of notes) counts.set(note.threadId, (counts.get(note.threadId) ?? 0) + 1);
+  const most = Math.max(...counts.values());
+  const busiest = notes.find((note) => counts.get(note.threadId) === most)!.threadId;
+  const own = notes.filter((note) => note.threadId === busiest);
+  return own.find((note) => !note.urgent) ?? own[0]!;
+}
+
+/** Takes off the notes a run heard, leaving any that arrived after it set off. */
+export function withoutCoordinationNotes(lead: Thread, heard: ReadonlySet<string>): Thread {
+  const rest = (lead.coordinationNotes ?? []).filter((note) => !heard.has(note.id));
+  if (rest.length) return { ...lead, coordinationNotes: rest };
+  const { coordinationNotes: _delivered, ...thread } = lead;
+  return thread;
+}
+
+/** What a delivery is called, or its own name for one only a newer build on a paired computer knows. */
+export function deliveryLabel(delivers: string): string {
+  return DELIVERIES.find((delivery) => delivery.id === delivers)?.label ?? delivers;
+}
+
+export function isDelivery(value: unknown): value is Delivery {
+  return DELIVERIES.some((delivery) => delivery.id === value);
+}
+
+export function isCoordinationState(value: unknown): value is CoordinationState {
+  return COORDINATION_STATES.includes(value as CoordinationState);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function text(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max;
+}
+
+function finite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function isThreadBrief(value: unknown): value is ThreadBrief {
+  return isRecord(value) && text(value.intent, MAX_BRIEF_FIELD) && text(value.doneWhen, MAX_BRIEF_FIELD) && isDelivery(value.delivers);
+}
+
+/** Shape only: whether the model may run a coordinator's threads, and takes the effort, is decided where it is read. */
+export function isThreadModelChoice(value: unknown): value is ThreadModelChoice {
+  return isRecord(value) && (value.engine === undefined || isAgentEngine(value.engine)) && isModelId(value.model) && (value.effort === undefined || isAgentEffort(value.effort));
+}
+
+function isMemoryNote(value: unknown): value is MemoryNote {
+  return isRecord(value) && text(value.id, 200) && typeof value.text === "string" && finite(value.at);
+}
+
+/** Shape only, so a memory written under a longer limit still loads. */
+export function isCoordinatorMemory(value: unknown): value is CoordinatorMemory {
+  return isRecord(value)
+    && (value.purpose === undefined || typeof value.purpose === "string")
+    && (value.purposeCleared === undefined || Number.isSafeInteger(value.purposeCleared))
+    && Array.isArray(value.notes) && value.notes.every(isMemoryNote)
+    && Number.isSafeInteger(value.revision) && (value.revision as number) >= 0
+    && (value.heard === undefined || finite(value.heard));
+}
+
+/** A change as it arrives from outside the window, held to the limits a new one is written under. */
+export function isMemoryChange(value: unknown): value is MemoryChange {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "purpose": return value.purpose === null || typeof value.purpose === "string" && value.purpose.length <= MAX_PURPOSE;
+    case "remember": return text(value.text, MAX_MEMORY_NOTE);
+    case "edit": return text(value.noteId, MAX_MEMORY_NOTE_ID) && text(value.text, MAX_MEMORY_NOTE);
+    case "forget": return text(value.noteId, MAX_MEMORY_NOTE_ID);
+    default: return false;
+  }
+}
+
+function optionalText(value: unknown, max: number): boolean {
+  return value === undefined || text(value, max);
+}
+
+/**
+ * A suggestion as it arrives from a run, held to the limits a new one is written under. Its prompt and
+ * worktree id are held where the request is read, to the limits every request's are.
+ */
+export function isProposalRequest(value: unknown): value is ProposalRequest {
+  return isRecord(value) && text(value.title, MAX_PROPOSAL_TITLE) && typeof value.prompt === "string" && value.prompt.trim().length > 0
+    && (value.brief === undefined || isThreadBrief(value.brief))
+    && optionalText(value.project, MAX_PROPOSAL_PROJECT)
+    && (value.worktree === undefined || typeof value.worktree === "boolean")
+    && (value.worktreeId === undefined || typeof value.worktreeId === "string" && value.worktreeId.trim().length > 0)
+    && (value.engine === undefined || isAgentEngine(value.engine))
+    && (value.model === undefined || isModelId(value.model))
+    && (value.effort === undefined || isAgentEffort(value.effort))
+    && (value.role === undefined || isThreadRole(value.role))
+    && optionalText(value.computer, MAX_PROPOSAL_COMPUTER);
+}
+
+function isProposalPlace(value: unknown): value is ProposalPlace {
+  return isRecord(value)
+    && (value.project === undefined || typeof value.project === "string")
+    && (value.worktree === undefined || typeof value.worktree === "boolean")
+    && (value.worktreeId === undefined || typeof value.worktreeId === "string")
+    && (value.computer === undefined || isRecord(value.computer) && text(value.computer.id, 256) && typeof value.computer.name === "string");
+}
+
+/** Shape only, so a suggestion written under a longer limit still loads. */
+export function isThreadProposal(value: unknown): value is ThreadProposal {
+  return isRecord(value) && text(value.id, 200) && typeof value.title === "string" && (value.named === undefined || value.named === true)
+    && typeof value.prompt === "string"
+    && (value.brief === undefined || isThreadBrief(value.brief)) && isProposalPlace(value.place)
+    && (value.engine === undefined || isAgentEngine(value.engine))
+    && (value.model === undefined || isModelId(value.model))
+    && (value.effort === undefined || isAgentEffort(value.effort))
+    && (value.role === undefined || isThreadRole(value.role))
+    && (value.from === undefined || text(value.from, 200))
+    && finite(value.proposedAt)
+    && (value.error === undefined || typeof value.error === "string")
+    && (value.carried === undefined || value.carried === true);
+}
+
+/** Shape only, as a thread stores the coordinator elsewhere it works under. */
+export function isRemoteLead(value: unknown): value is RemoteLead {
+  if (!isRemoteSender(value)) return false;
+  const { proposalId } = value as RemoteLead;
+  return proposalId === undefined || text(proposalId, 200);
+}
+
+/** Shape only, as a thread stores the coordinator elsewhere it works under, away or not. */
+export function isHeldLead(value: unknown): value is HeldLead {
+  if (!isRemoteLead(value)) return false;
+  const { away, backAt } = value as HeldLead;
+  return (away === undefined || away === true) && (backAt === undefined || finite(backAt));
+}
+
+/** Shape only: each of a coordinator's threads elsewhere, by id, with when its news was last taken. */
+export function isRemoteHeard(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every(finite);
+}
+
+/** Shape only: each of a coordinator's threads elsewhere that Stop all stopped, by id, with the computer holding it and the run it asked to end. */
+export function isRemoteStops(value: unknown): value is Record<string, RemoteStop> {
+  return isRecord(value) && Object.values(value).every((stop) => isRecord(stop) && typeof stop.computer === "string" && (stop.runId === undefined || typeof stop.runId === "string")
+    && (stop.answer === undefined || isRecord(stop.answer) && finite(stop.answer.at) && (stop.answer.runId === undefined || typeof stop.answer.runId === "string")));
+}
+
+/** Shape only: each start elsewhere Stop all caught on its way, by suggestion, with the computer it went to and the thread it became. */
+export function isCaughtStarts(value: unknown): value is Record<string, CaughtStart> {
+  return isRecord(value) && Object.values(value).every((start) => isRecord(start) && typeof start.computer === "string" && (start.threadId === undefined || typeof start.threadId === "string"));
+}
+
+/** Shape only: each of a coordinator's threads last seen working elsewhere, by id, with the computer holding it and its title. */
+export function isRemoteWorking(value: unknown): value is Record<string, HeardWork> {
+  return isRecord(value) && Object.values(value).every((work) => isRecord(work) && typeof work.computer === "string" && typeof work.title === "string");
+}
+
+/** What a thread says in a report, held to what its thread is saved with. */
+export function isReportSummary(value: unknown): value is string {
+  return text(value, MAX_SUMMARY);
+}
+
+export function isCoordinationReport(value: unknown): value is CoordinationReport {
+  return isRecord(value) && isCoordinationState(value.state) && isReportSummary(value.summary) && finite(value.at);
+}
+
+export function isDecisionOption(value: unknown): value is DecisionOption {
+  return isRecord(value) && text(value.label, MAX_OPTION_LABEL)
+    && (value.description === undefined || text(value.description, MAX_OPTION_DESCRIPTION))
+    && (value.recommended === undefined || value.recommended === true);
+}
+
+/** What a run may ask: the question, and the options it offers. The window stamps the rest. */
+export type DecisionRequest = Pick<Decision, "question" | "context" | "options">;
+
+/** Each option names itself, so the answer, which is only its label, says which one the user chose. */
+export function distinctLabels(options: readonly Pick<DecisionOption, "label">[]): boolean {
+  return new Set(options.map((option) => option.label.trim().toLowerCase())).size === options.length;
+}
+
+function isDecisionShape(value: unknown): value is DecisionRequest {
+  return isRecord(value) && text(value.question, MAX_QUESTION)
+    && (value.context === undefined || text(value.context, MAX_DECISION_CONTEXT))
+    && Array.isArray(value.options) && value.options.length <= MAX_OPTIONS && value.options.every(isDecisionOption);
+}
+
+export function isDecisionRequest(value: unknown): value is DecisionRequest {
+  return isDecisionShape(value) && distinctLabels(value.options);
+}
+
+/** Shape only, so a decision saved before its labels had to differ still loads. */
+export function isDecision(value: unknown): value is Decision {
+  if (!isRecord(value) || !isDecisionShape(value)) return false;
+  const decision = value as Record<string, unknown>;
+  return text(decision.id, 200) && finite(decision.raisedAt)
+    && (decision.answer === undefined || text(decision.answer, MAX_ANSWER))
+    && (decision.answeredAt === undefined || finite(decision.answeredAt));
+}
+
+export function isCoordinationNote(value: unknown): value is CoordinationNote {
+  return isRecord(value) && text(value.id, 200) && text(value.threadId, 200) && typeof value.text === "string" && finite(value.at)
+    && (value.urgent === undefined || value.urgent === true)
+    && (value.runId === undefined || text(value.runId, 200))
+    && (value.quiet === undefined || value.quiet === true);
+}
+
+/** What coordination keeps on a thread: who it works under, what it reports and asks, and a coordinator's own bookkeeping. */
+export type CoordinationThread = {
+  /** The coordinator this thread works under. It only counts while that thread is a live coordinator. */
+  parentId?: string;
+  /**
+   * The coordinator on a paired computer this thread works under, as that computer named it when it
+   * started the thread here, with the suggestion it is when the user allowed it there. A coordinator
+   * of its own here outranks it.
+   */
+  remoteLead?: HeldLead;
+  /** What the coordinator asked of this thread when it started it. */
+  brief?: ThreadBrief;
+  /** Where this thread last said its work stands. */
+  report?: CoordinationReport;
+  /**
+   * Under a coordinator: when its work was settled, by the user or by its own pull request merging,
+   * which files it away under Resolved until a message starts it again.
+   */
+  resolvedAt?: number;
+  /** Choices this thread has put to the user, answered or not. */
+  decisions?: Decision[];
+  /** On a coordinator: what its threads have done that it has yet to be told. */
+  coordinationNotes?: CoordinationNote[];
+  /** On a coordinator: what the threads it starts run on unless it names another. */
+  threadModel?: ThreadModelChoice;
+  /** On a coordinator: its purpose and the notes it keeps, which it and every thread it starts read. */
+  memory?: CoordinatorMemory;
+  /** On a coordinator: threads it suggested that wait for the user to start or dismiss them. */
+  proposals?: ThreadProposal[];
+  /** On a coordinator: set while the user wants no desktop notice from it or its threads. */
+  muted?: true;
+  /**
+   * On a coordinator: for each of its threads on a paired computer, the newest moment on that
+   * computer's clock whose news it has taken, so news from while the link was down is caught up.
+   */
+  remoteHeard?: Record<string, number>;
+  /**
+   * On a coordinator: each of its threads that a paired computer last said was working, with that
+   * computer's id and the thread's title, so a computer silent since this app started is not taken
+   * for their work ending, and the coordinator can still name them.
+   */
+  remoteWorking?: Record<string, HeardWork>;
+  /**
+   * On a coordinator: each of its threads on a paired computer whose work Stop all stopped there, until
+   * it hears that turn end, which it hears quietly, after a restart here too, unless the turn finished
+   * or failed on its own, and the turn the agent opens there to answer stopped session work, however it
+   * ends. A thread that carries on with a run of its own first, or is no longer under it, is no longer
+   * the stop's.
+   */
+  remoteStops?: Record<string, RemoteStop>;
+  /**
+   * On a coordinator: each start of a thread on a paired computer, by the suggestion it is, that Stop
+   * all caught on its way there, after a restart here too. Whenever it lands it is stopped there, even
+   * once the coordinator is filed away or its role taken off, and its turn ending is heard quietly. One
+   * that computer refused, or that is no longer under it, is let go.
+   */
+  caughtStarts?: Record<string, CaughtStart>;
+};

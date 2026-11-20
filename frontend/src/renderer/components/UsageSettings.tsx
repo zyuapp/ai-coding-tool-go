@@ -1,0 +1,122 @@
+import { LuRefreshCw as RefreshCw } from "react-icons/lu";
+import { SettingsSection } from "./SettingsLayout";
+import { Button } from "../ui/Button";
+import { Select } from "../ui/Field";
+import { useEffect } from "react";
+import type { ComputerUsage, PlanUsageState } from "../../application/plan-limits";
+import { AGENT_ENGINES, engineLabel, type AgentEngine } from "../../domain/agent-engine";
+import { barShare, formatReset, formatShare, planLabel, type PlanUsage } from "../../domain/plan-usage";
+import { SpinningIcon } from "./SpinningIcon";
+
+const HIGH_SHARE = 90;
+
+function UsageBar({ label, share }: { label: string; share: number | null }) {
+  const high = (share ?? 0) >= HIGH_SHARE ? " high" : "";
+  return (
+    <div className="usage-window-bar">
+      <span className="usage-window-track" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={barShare(share)} aria-valuetext={formatShare(share)}>
+        <span className={`usage-window-fill${high}`} style={{ width: `${barShare(share)}%` }} />
+      </span>
+      <span className={`usage-window-share${high}`} aria-hidden="true">{formatShare(share)}</span>
+    </div>
+  );
+}
+
+export type UsageSettingsProps = {
+  usage: PlanUsageState;
+  /** What this computer calls itself, which names it in the computer picker. */
+  name?: string;
+  /** Each paired computer's own limits. With none, the page is this computer's alone. */
+  computers?: readonly ComputerUsage[];
+  /** The paired computer shown. Null shows this one. */
+  selected?: string | null;
+  onSelect?: (computerId: string | null) => void;
+  onRefresh: () => void;
+  timeZone?: string;
+};
+
+const THIS_COMPUTER = "";
+
+export function UsageSettings({ usage, name = "", computers = [], selected = null, onSelect = () => {}, onRefresh, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone }: UsageSettingsProps) {
+  useEffect(() => { onRefresh(); }, []);
+  const computer = computers.find((candidate) => candidate.id === selected) ?? null;
+  /** Only the computer on screen holds the button: another computer's slow read does not. */
+  const reading = computer ? Boolean(computer.usage?.reading.length) : usage.reading.length > 0;
+
+  return (
+    <SettingsSection setting="usage.plan-limits" description="Usage and reset times reported by each provider." aria-live="polite" action={<>
+      {computers.length > 0 && (
+        <Select label="Computer" value={computer?.id ?? THIS_COMPUTER} onChange={(event) => onSelect(event.target.value || null)}>
+          <option value={THIS_COMPUTER}>{name ? `This computer · ${name}` : "This computer"}</option>
+          {computers.map((paired) => <option key={paired.id} value={paired.id}>{paired.name}{paired.status === "connected" ? "" : " · Offline"}</option>)}
+        </Select>
+      )}
+      <Button disabled={reading} aria-busy={reading || undefined} onClick={onRefresh} icon={<SpinningIcon icon={RefreshCw} spinning={reading} size={14} aria-hidden="true" />}>
+        <span>{reading ? "Reading…" : "Refresh"}</span>
+      </Button>
+    </>}>
+      {computer
+        ? <PairedUsage key={computer.id} computer={computer} timeZone={timeZone} />
+        : <Providers usage={usage} scope="this" asked onRetry={onRefresh} timeZone={timeZone} />}
+    </SettingsSection>
+  );
+}
+
+/** A paired computer's limits, or why there are none to draw. */
+function PairedUsage({ computer, timeZone }: { computer: ComputerUsage; timeZone: string }) {
+  if (computer.status === "connected" && computer.supported && computer.usage) return <Providers usage={computer.usage} scope={computer.id} timeZone={timeZone} />;
+  const empty = computer.status === "connecting" ? "Reconnecting…"
+    : computer.status !== "connected" ? "Offline"
+    : !computer.supported ? "Update AI Coding Tool on that computer to see its limits."
+    : "Reading usage…";
+  return <div className="usage-computer-empty"><p className="settings-empty">{empty}</p></div>;
+}
+
+/** `asked` marks this computer's own limits, which opening the page always reads and `onRetry` reads again. */
+function Providers({ usage: { reports, reading }, scope, asked = false, onRetry, timeZone }: { usage: PlanUsageState; scope: string; asked?: boolean; onRetry?: () => void; timeZone: string }) {
+  return (
+    <div className="usage-providers">
+      {AGENT_ENGINES.map((engine) => <ProviderUsage key={engine} engine={engine} usage={reports[engine]} reading={asked || reading.includes(engine)} retrying={reading.includes(engine)} onRetry={onRetry} scope={scope} timeZone={timeZone} />)}
+    </div>
+  );
+}
+
+function ProviderUsage({ engine, usage, reading, retrying, onRetry, scope, timeZone }: { engine: AgentEngine; usage: PlanUsage | undefined; reading: boolean; retrying: boolean; onRetry?: () => void; scope: string; timeZone: string }) {
+  const heading = `usage-${scope}-${engine}-heading`;
+  const plan = usage?.status === "available" ? planLabel(usage.subscription) : null;
+  return (
+    <section className="usage-provider" aria-labelledby={heading}>
+      <div className="usage-provider-heading">
+        <h4 id={heading}>{engineLabel(engine)}</h4>
+        {plan && <span className="usage-plan">{plan}</span>}
+      </div>
+
+      {usage === undefined && <p className="settings-empty">{reading ? "Reading usage…" : "Not read yet."}</p>}
+      {usage?.status === "not-applicable" && <p className="settings-empty">No plan limits apply to this sign-in.</p>}
+      {usage?.status === "unavailable" && (
+        <p className="settings-error" role="alert">
+          {usage.message}
+          {onRetry && <Button variant="link" className="settings-empty-action" disabled={retrying} aria-busy={retrying || undefined} onClick={onRetry}>{retrying ? "Reading…" : "Try again"}</Button>}
+        </p>
+      )}
+      {usage?.status === "available" && <UsageWindows usage={usage} timeZone={timeZone} />}
+    </section>
+  );
+}
+
+function UsageWindows({ usage, timeZone }: { usage: Extract<PlanUsage, { status: "available" }>; timeZone: string }) {
+  return (
+    <div className="usage-windows">
+      {usage.windows.map((window) => {
+        const reset = formatReset(window.resetsAt, Date.now(), timeZone);
+        return (
+          <div className="usage-window" key={window.id}>
+            <strong>{window.label}</strong>
+            <UsageBar label={window.label} share={window.utilization} />
+            {reset && <p>{reset}</p>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}

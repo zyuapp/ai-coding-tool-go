@@ -1,0 +1,133 @@
+import { useEffect } from "react";
+import { shortcutCommands, type WorkspaceInput } from "../../application/workspace-reducer";
+import type { WorkspaceState } from "../../application/workspace-state";
+import { DICTATION_TAP_MS } from "../../domain/dictation";
+import { displayShortcut, keystrokeOf, resolveShortcuts, shortcutFor } from "../../domain/shortcuts";
+import { platformCapabilities } from "../platform";
+import { installFocusAppearance } from "../focus-appearance";
+import { installGlassTint, installWindowActivity, WINDOW_ACTIVITY_EVENT, windowInUse } from "../window-activity";
+import { onTerminalFindResults, onTerminalResize } from "./terminal-views";
+
+export type SubscriptionHost = {
+  restored: boolean;
+  displayedState(): WorkspaceState;
+  dispatch: (input: WorkspaceInput) => Promise<void>;
+};
+
+/** DOM focus and terminal views belong to the window displaying the workspace. */
+export function useWorkspaceSubscriptions(host: SubscriptionHost) {
+  useEffect(installFocusAppearance, []);
+  useEffect(installWindowActivity, []);
+  useEffect(installGlassTint, []);
+  /** Main hears the dictation keystroke but leaves it to the page, so its character is never typed. */
+  useEffect(() => {
+    function swallow(event: KeyboardEvent) {
+      const stroke = keystrokeOf({ key: event.key, code: event.code, meta: event.metaKey, control: event.ctrlKey, alt: event.altKey, shift: event.shiftKey }, platformCapabilities().commandKey);
+      if (stroke && shortcutFor(resolveShortcuts(host.displayedState().shortcuts), stroke, "any")?.action === "dictation.hold") event.preventDefault();
+    }
+    window.addEventListener("keydown", swallow, true);
+    return () => window.removeEventListener("keydown", swallow, true);
+  }, []);
+  /**
+   * A hold whose key or pointer goes up in another app never hears its release, so leaving the window
+   * drops it. Hands-free dictation keeps listening.
+   */
+  useEffect(() => {
+    function left() {
+      const session = host.displayedState().dictation.session;
+      if (!windowInUse() && session && !session.handsFree) void host.dispatch({ type: "dictation.cancel" });
+    }
+    window.addEventListener(WINDOW_ACTIVITY_EVENT, left);
+    return () => window.removeEventListener(WINDOW_ACTIVITY_EVENT, left);
+  }, []);
+  useEffect(() => {
+    const onFocus = () => void host.dispatch({ type: "view.set-focused", focused: true });
+    const onBlur = () => void host.dispatch({ type: "view.set-focused", focused: false });
+    if (typeof document !== "undefined") void host.dispatch({ type: "view.set-focused", focused: document.hasFocus() });
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+  useEffect(() => {
+    const stopReporting = onTerminalFindResults((terminalId, results) => void host.dispatch({ type: "find.results", target: { kind: "terminal", terminalId }, results }));
+    const stopSizing = onTerminalResize((terminalId, cols, rows) => void host.dispatch({ type: "terminal.resize", terminalId, cols, rows }));
+    return () => {
+      stopReporting();
+      stopSizing();
+    };
+  }, []);
+  useEffect(() => {
+    let frame = 0;
+    const look = () => {
+      frame = 0;
+      const tab = document.activeElement?.closest("[data-dock-tab]")?.getAttribute("data-dock-tab") ?? null;
+      void host.dispatch({ type: "view.dock-keys", tab });
+    };
+    const settle = () => { frame ||= requestAnimationFrame(look); };
+    window.addEventListener("focusin", settle);
+    window.addEventListener("focusout", settle);
+    return () => {
+      window.removeEventListener("focusin", settle);
+      window.removeEventListener("focusout", settle);
+      cancelAnimationFrame(frame);
+    };
+  }, []);
+  useEffect(() => {
+    if (!("desktop" in window)) return;
+    /** When the dictation key went down, or null when its press stopped hands-free dictation instead. */
+    let talkPressedAt: number | null = null;
+    const stopListening = window.desktop.onShortcut(({ action, surface }) => {
+      if (action === "dictation.hold") {
+        const session = host.displayedState().dictation.session;
+        const stopping = session?.handsFree === true && session.phase !== "transcribing";
+        talkPressedAt = stopping ? null : Date.now();
+        void host.dispatch({ type: stopping ? "dictation.stop" : "dictation.start" });
+      } else if (action === "dictation.release") {
+        if (talkPressedAt === null) return;
+        const tapped = Date.now() - talkPressedAt < DICTATION_TAP_MS;
+        talkPressedAt = null;
+        void host.dispatch({ type: tapped ? "dictation.hands-free" : "dictation.stop" });
+      }
+      else if (action === "run.allow" || action === "run.deny") {
+        for (const command of shortcutCommands(host.displayedState(), action, surface)) void host.dispatch(command);
+      } else void host.dispatch({ type: "view.shortcut", action, surface });
+    });
+    const stopCapturing = window.desktop.onShortcutCaptured((binding) => void host.dispatch({ type: "shortcut.captured", binding }));
+    const stopRefusals = window.desktop.onDesktopShortcutRefused((refusal) => void host.dispatch(refusal.reason === "unsupported"
+      ? { type: "shortcut.unavailable", refusal }
+      : { type: "action.failed", message: `${displayShortcut(refusal.binding, platformCapabilities().commandKey)} belongs to another app, so grabbing a window has no shortcut.` }));
+    return () => {
+      stopListening();
+      stopCapturing();
+      stopRefusals();
+    };
+  }, []);
+  useEffect(() => {
+    if (host.restored) void host.dispatch({ type: "view.mounted" });
+  }, [host.restored]);
+  useEffect(() => {
+    function navigate(event: MouseEvent) {
+      if (event.button !== 3 && event.button !== 4) return;
+      /** Chromium walks its own session history on the press, which would take the window off the app. */
+      event.preventDefault();
+      if (event.type !== "mouseup") return;
+      void host.dispatch({ type: "view.shortcut", action: event.button === 3 ? "nav.back" : "nav.forward", surface: "any" });
+    }
+    window.addEventListener("mousedown", navigate);
+    window.addEventListener("mouseup", navigate);
+    return () => {
+      window.removeEventListener("mousedown", navigate);
+      window.removeEventListener("mouseup", navigate);
+    };
+  }, []);
+  useEffect(() => {
+    const stops = [
+      window.desktop.onWindowScreenshot((shot) => void host.dispatch({ type: "image.add", path: shot.path, label: shot.title ? `${shot.app} — ${shot.title}` : shot.app })),
+      window.desktop.onOpenThread((taskId) => void host.dispatch({ type: "task.select", taskId })),
+    ];
+    return () => { for (const stop of stops) stop(); };
+  }, []);
+}

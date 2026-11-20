@@ -1,0 +1,494 @@
+/* A coordinator's threads, a thread's place under its coordinator, and the decisions waiting on the user. */
+
+.coordination-head {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 10px var(--page-inset) 12px;
+  background: linear-gradient(var(--canvas) calc(100% - 12px), var(--canvas-fade));
+  pointer-events: none;
+}
+.coordination-head > * { pointer-events: auto; }
+.workspace.summary-open .coordination-head { padding-right: calc(var(--page-inset) + 282px); }
+.work-area.coordination-bar-on .conversation { padding-top: 96px; }
+.work-area.coordination-brief-on .conversation { padding-top: 64px; }
+
+.coordination-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--line-bright); }
+.coordination-dot.done { background: var(--success); }
+.coordination-dot.blocked, .coordination-dot.failed { background: var(--danger); }
+.coordination-dot.asking, .coordination-dot.approval { background: var(--accent); }
+/** An open pull request is a ring: the work is there, and only the user's review closes it. One that needs work first rings in danger. */
+.coordination-dot.review { background: transparent; box-shadow: inset 0 0 0 1.6px var(--success); }
+.coordination-dot.needs-work { background: transparent; box-shadow: inset 0 0 0 1.6px var(--danger); }
+.coordination-dot.resolved { background: var(--quiet); }
+
+.coordination-bar {
+  --glass-radius: 12px;
+  max-width: 860px;
+  margin: 0 auto;
+  font-size: var(--text-menu);
+}
+.coordination-bar-line { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 8px 0 12px; }
+.coordination-bar-lead { color: var(--muted); }
+.coordination-bar-asking { margin-left: auto; color: var(--accent); }
+.coordination-bar-line + .coordination-brief { border-top: 1px solid var(--line-soft); }
+.coordination-brief summary { padding: 7px 12px; color: var(--ink-dim); font-weight: 550; cursor: pointer; }
+.coordination-brief summary::marker { color: var(--quiet-strong); }
+.coordination-brief summary:hover { background: var(--wash); color: var(--ink-soft); }
+.coordination-brief dl { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px 12px; margin: 0; padding: 2px 12px 11px; }
+.coordination-brief dt { color: var(--quiet); font-size: var(--text-meta); padding-top: 1px; }
+.coordination-brief dd { margin: 0; color: var(--ink-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordination-brief-intent { border-left: 2px solid var(--accent-line); padding-left: 9px; font-style: italic; }
+
+/** Each page of the Needs-you card: a head naming who asks, what is asked, and the answers along its foot. */
+.decision-card {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto 8px;
+  font-size: var(--text-menu);
+  line-height: 1.5;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: min(46vh, 400px);
+  overflow-wrap: anywhere;
+}
+/** A page the keyboard is handed once the one before it is settled shows it holds focus, as a control does. */
+.decision-card:focus-visible:where(:root:not([data-focus-appearance="quiet"]) *) { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.decision-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px 6px; font-size: var(--text-meta); }
+.decision-head > strong { color: var(--accent-text); font-size: var(--text-menu); font-weight: 650; }
+.decision-from-arrow { margin-left: 3px; vertical-align: -1px; opacity: 0.8; }
+.decision-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.decision-pager { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.decision-question { margin: 0 14px 2px; color: var(--ink); font-size: var(--text-control); font-weight: 600; }
+.decision-context { margin: 0 14px 4px; color: var(--muted); white-space: pre-wrap; }
+.decision-options { display: grid; gap: 6px; margin: 8px 14px 12px; }
+.decision-option { display: flex; align-items: flex-start; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; }
+.decision-option:hover, .decision-option:has(input:checked) { background: var(--accent-surface); border-color: var(--accent-line-strong); }
+.decision-option:has(input:focus-visible:where(:root:not([data-focus-appearance="quiet"]) *)) { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.decision-option input { flex: none; margin: 4px 0 0; accent-color: var(--accent); outline: none; }
+.decision-option-label { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.decision-option-description { display: block; color: var(--muted); font-size: var(--text-meta); }
+.decision-options.overridden .decision-option:not(:hover) { opacity: 0.55; }
+.decision-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line-soft); }
+.decision-foot:has(.decision-own) { align-items: flex-end; }
+.decision-own { flex: 1; }
+.decision-foot-gap { flex: 1; }
+/** While a destructive answer waits to be confirmed, the answer that goes ahead steps aside. */
+.suggestion-row:has(.armed) .suggestion-start, .decision-foot:has(.armed) :is(.suggestion-start-all, .decision-allow) { display: none; }
+/** A coordinator's suggested threads: one row each, started by its round arrow, dismissed by its ✕. */
+.suggestion-list { margin: 0; padding: 0 8px 8px; list-style: none; }
+.suggestion-row { display: flex; align-items: center; gap: 6px; min-width: 0; border-radius: 9px; padding: 5px 6px 5px 8px; }
+.suggestion-row:hover, .suggestion-row:focus-within { background: var(--surface-hover); }
+.suggestion-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.suggestion-text strong { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-text small { color: var(--muted); font-size: var(--text-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-text .suggestion-error { color: var(--danger-soft); white-space: normal; }
+.suggestion-row.starting .suggestion-text { opacity: 0.7; }
+.suggestion-dismiss-slot { flex: none; display: inline-flex; align-items: center; gap: 4px; }
+.suggestion-start.task-spinner { width: 14px; height: 14px; margin: 0 7px; }
+/** A thread asked for on another computer: that computer in the heading, then where there it would run and what it was asked. */
+.elsewhere-heading { display: inline-flex; align-items: center; gap: 5px; }
+.elsewhere-heading .host-mark { color: inherit; font-size: inherit; font-weight: inherit; }
+.elsewhere-place { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 8px 14px 10px; color: var(--ink-dim); font-size: var(--text-menu); }
+.elsewhere-folder { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.elsewhere-card .coordination-brief { margin: 0 14px 10px; border: 1px solid var(--line-soft); border-radius: 9px; }
+.elsewhere-card .suggestion-error { margin: 0 14px 10px; color: var(--danger-soft); font-size: var(--text-meta); }
+.decision-body > :is(.approval-command, .approval-change, .approval-raw) { margin: 6px 14px 10px; border-color: var(--line-soft); }
+
+/* A coordinator's threads in the session panel, each opening as a tab in its dock. */
+.coordination-heading { display: flex; align-items: center; height: 26px; }
+.subagent-heading > .coordination-count { color: var(--info-soft); font-size: var(--text-meta); font-weight: 550; }
+.subagent-heading > .coordination-count.waiting { color: var(--accent); }
+.coordination-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 9px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.coordination-row:hover { background: var(--surface-hover); color: var(--ink-soft); }
+.coordination-row > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
+.coordination-row-mark { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; background: var(--control); box-shadow: var(--glass-rim); }
+.coordination-row-mark .task-spinner { width: 10px; height: 10px; }
+.coordination-row-mark .coordination-dot { width: 7px; height: 7px; }
+/** A thread's card in its coordinator's conversation wears the marks and colours of its Overview row. */
+:is(.coordination-item, .coordination-card).working .coordination-row-mark { background: var(--info-surface); }
+:is(.coordination-item, .coordination-card).done .coordination-row-mark { background: var(--success-surface); }
+:is(.coordination-item, .coordination-card):is(.blocked, .failed, .needs-work) .coordination-row-mark { background: var(--danger-chip); }
+:is(.coordination-item, .coordination-card):is(.asking, .approval) .coordination-row-mark { background: var(--accent-chip); }
+:is(.coordination-item, .coordination-card):is(.asking, .approval) small { color: var(--accent); }
+:is(.coordination-item, .coordination-card):is(.blocked, .failed, .needs-work) small { color: var(--danger-soft); }
+.coordination-row-marks { display: flex; align-items: center; gap: 6px; transition: opacity 0.15s ease; }
+.coordination-row-engine { color: var(--quiet); }
+.coordination-row-marks > .coordination-row-host { flex: none; max-width: 96px; }
+:is(.coordination-item, .coordination-card).review .coordination-row-mark { background: var(--success-surface); }
+/**
+ * A row's own action sits beside its open button, centred where the row leaves room for it: the
+ * row's 8px padding and half a 12px mark, less half its own 24px.
+ */
+.coordination-item { position: relative; min-width: 0; }
+.coordination-item.resolved > .coordination-thread { opacity: 0.62; }
+.coordination-item.resolved:hover > .coordination-thread, .coordination-item.resolved:focus-within:where(:root:not([data-focus-appearance="quiet"]) *) > .coordination-thread { opacity: 1; }
+.coordination-item:has(> .coordination-row-action) > .coordination-thread { padding-right: 34px; }
+.coordination-row-action {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  padding: 0;
+  background: transparent;
+  color: var(--quiet-strong);
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+/** Resolving is what a reviewed or finished thread waits on, so its check is framed. */
+.coordination-item:is(.review, .done) > .coordination-row-action { background: var(--control); color: var(--ink-dim); }
+.coordination-row-action:hover:not(:disabled) { background: var(--surface-hover); color: var(--ink-soft); }
+.coordination-row-action[data-action="resolve"]:hover:not(:disabled) { background: var(--success-surface); color: var(--success); }
+/** A resolved thread's check is ticked, and turns into an undo while pointed at. */
+.coordination-row-action[data-action="reopen"] { color: var(--success); }
+.coordination-row-action[data-action="reopen"] > .resolution-undo { display: none; }
+.coordination-row-action[data-action="reopen"]:is(:hover, :focus-visible) > .resolution-ticked { display: none; }
+.coordination-row-action[data-action="reopen"]:is(:hover, :focus-visible) > .resolution-undo { display: block; }
+/** In the Overview a row's status is its dot alone, and its Resolve takes the place of its marks while the row is pointed at. */
+.coordination-overview .coordination-item .coordination-row-mark { background: none; box-shadow: none; }
+.coordination-overview .coordination-item .coordination-dot { width: 8px; height: 8px; }
+.coordination-overview .coordination-item:has(> .coordination-row-action) > .coordination-thread { padding-right: 8px; }
+.coordination-overview .coordination-item > .coordination-row-action { right: 6px; width: 28px; height: 28px; border-radius: 6px; background: transparent; box-shadow: none; color: var(--muted-strong); transition: opacity var(--touch-time) var(--touch-ease), background-color var(--touch-time) var(--touch-ease); }
+.coordination-overview .coordination-item > .coordination-row-action:hover:not(:disabled) { background: var(--wash); color: var(--ink); }
+.coordination-overview .coordination-item > .coordination-row-action[data-action="resolve"]:hover:not(:disabled) { color: var(--info); }
+.coordination-overview .coordination-item > .coordination-row-action[data-action="reopen"] { color: var(--success); }
+@media (hover: hover) {
+  .coordination-overview .coordination-item > .coordination-row-action[data-action="resolve"] { opacity: 0; }
+  .coordination-overview .coordination-item:is(:hover, :focus-within) > .coordination-row-action { opacity: 1; }
+  .coordination-overview .coordination-item:has(> .coordination-row-action[data-action="resolve"]):is(:hover, :focus-within) .coordination-row-marks,
+  .coordination-overview .coordination-item:has(> .coordination-row-action[data-action="reopen"]) .coordination-row-marks { opacity: 0; }
+}
+/* The threads a coordinator started, as cards in its conversation where each began, wrapping across the column. */
+.coordination-cards { display: flex; flex-wrap: wrap; gap: 8px; }
+.coordination-card {
+  --glass-radius: 12px;
+  box-sizing: border-box;
+  width: 260px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.coordination-card.resolved { opacity: 0.62; }
+.coordination-card.resolved:hover { opacity: 1; }
+.coordination-card-open {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  border: 0;
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/** Pointing at the open area washes the whole card, its steps included, so it reads as one surface. */
+.coordination-card { transition: box-shadow 0.15s ease; }
+.coordination-card:has(> .coordination-card-open:hover) { box-shadow: var(--glass-rim), inset 0 0 0 100vmax var(--surface-hover); }
+.coordination-card-head { min-width: 0; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.coordination-card-head strong { min-width: 0; overflow: hidden; color: var(--ink-soft); font-size: var(--text-control); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.coordination-card-open > small { min-width: 0; padding-left: 30px; overflow: hidden; font-size: var(--text-meta); text-overflow: ellipsis; white-space: nowrap; }
+.coordination-card-pull-request {
+  justify-self: start;
+  /** Held to the card's width, so its own column cannot grow to the whole line and the ellipsis can clip it. */
+  min-width: 0;
+  max-width: calc(100% - 30px);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 3px 0 0 30px;
+  border-radius: 6px;
+  padding: 1px 7px;
+  background: var(--wash);
+  color: var(--ink-dim);
+  font-size: var(--text-meta);
+  white-space: nowrap;
+}
+/** A long line ends in an ellipsis inside the chip, which says it whole on hover. */
+.coordination-card-pull-request > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.coordination-card-pull-request > svg { flex: none; color: var(--muted); }
+.coordination-card-pull-request[data-state="open"] > svg { color: var(--success); }
+.coordination-card-pull-request[data-state="merged"] > svg { color: var(--pr-merged); }
+.coordination-card-pull-request[data-state="closed"] > svg { color: var(--danger); }
+/** Next steps sit under the card's open area, beside it rather than inside it. */
+.coordination-card-steps { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 10px 40px; }
+.coordination-card-step { display: inline-flex; align-items: center; gap: 3px; font-size: var(--text-meta); white-space: nowrap; }
+
+/* A coordinator's Overview: its threads in groups, in a dock tab that scrolls as one list. */
+.coordination-overview {
+  --list-heading-top: -10px;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 10px 18px;
+}
+/** What the coordinator's threads run on, picked with the composer's own chips, whose menus open downward here. */
+.coordination-overview-header {
+  position: relative;
+  z-index: 2;
+  container-type: inline-size;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  padding: 0 0 0 8px;
+}
+.coordination-overview-label { color: var(--muted); font-size: var(--text-control); white-space: nowrap; }
+.coordination-overview-model { color: var(--ink-dim); font-size: var(--text-meta); white-space: nowrap; }
+.coordination-thread-model { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.coordination-overview-header .setting-popover { top: calc(100% + 4px); bottom: auto; left: 0; }
+.coordination-overview > .coordination-empty { padding: 6px 8px; }
+/** The purpose over what the threads run on, one pane of glass at the head of the Overview. */
+.coordination-overview-hero { --glass-radius: 14px; display: grid; gap: 4px; margin-bottom: 14px; padding: 8px 8px 8px 6px; }
+/** What the coordinator is for, read as the Overview's title and edited where it stands. */
+.coordination-purpose {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-control);
+  font-weight: 600;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+.coordination-purpose:hover { background: var(--surface-hover); }
+.coordination-purpose:not(.editing) { display: flex; align-items: center; gap: 6px; }
+.coordination-purpose > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.coordination-purpose-edit { flex: none; margin-left: auto; color: var(--quiet-strong); }
+.coordination-purpose:hover .coordination-purpose-edit { color: var(--ink-dim); }
+.coordination-purpose.editing, .coordination-note-text.editing, .coordination-note-add:focus { border-style: solid; border-color: var(--line-strong); background: var(--canvas); color: var(--ink); outline: none; }
+.coordination-placeholder { color: var(--quiet); font-weight: 450; }
+.coordination-memory { margin-top: 6px; }
+.coordination-note { position: relative; display: flex; align-items: center; min-width: 0; }
+.coordination-note-text, .coordination-note-add {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 8px 5px 12px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: var(--text-control);
+  line-height: 1.45;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+/** A note being written wraps as it reads, and an edited one keeps the room Forget leaves beside it. */
+textarea.coordination-note-text, .coordination-note-add { display: block; width: 100%; resize: none; overflow: hidden; field-sizing: content; }
+.coordination-note-text { padding-right: 34px; }
+.coordination-note-text:not(.editing) { white-space: pre-wrap; }
+.coordination-note-text:not(.editing):hover { background: var(--surface-hover); color: var(--ink-soft); }
+.coordination-note-text[aria-invalid="true"] { border-color: var(--danger-line); }
+.coordination-note-add::placeholder { color: var(--quiet-strong); }
+.coordination-note-add:hover:not(:focus, :disabled) { background: var(--surface-hover); }
+.coordination-note-add:disabled { cursor: default; }
+
+.coordination-note-add:focus { padding-right: 52px; }
+/** Forget, and once pressed its question, sit over the note's right end. */
+.coordination-note-actions { position: absolute; top: 3px; right: 3px; display: flex; gap: 4px; border-radius: 8px; }
+.coordination-note-actions:has(.danger) { background: var(--sunken); box-shadow: -10px 0 8px var(--sunken); }
+.coordination-note:has(.editing) .coordination-note-actions { display: none; }
+.coordination-group + .coordination-group { margin-top: 12px; }
+.coordination-group > .subagent-list { margin-top: 2px; }
+/** Notes line up with the thread titles above them, and the row that adds one leads with a plus where a thread has its dot. */
+.coordination-memory :is(.coordination-note-text, .coordination-note-add) { padding-left: 39px; }
+.coordination-note-plus { position: absolute; left: 13px; color: var(--quiet-strong); pointer-events: none; }
+.coordination-note:has(> .coordination-note-add:focus) > .coordination-note-plus { color: var(--muted); }
+.coordination-group.needs > .list-heading { color: var(--accent); }
+.coordination-stop { display: flex; gap: 4px; margin-right: 4px; }
+.coordination-more {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 8px 6px 40px;
+  background: transparent;
+  color: var(--quiet-strong);
+  font: inherit;
+  font-size: var(--text-meta);
+  text-align: left;
+  cursor: pointer;
+}
+.coordination-more:hover { background: var(--wash); color: var(--muted); }
+/** What a coordinator and its threads spent, lined up under its head's label, its bars thin cuts of the plan-usage ones. */
+.coordination-usage-body { --glass-radius: 12px; margin-top: 2px; padding: 4px 10px 8px; color: var(--muted); font-size: var(--text-menu); }
+.coordination-usage-own { margin: 2px 0 0; }
+.coordination-usage-own strong { color: var(--ink-soft); font-weight: 600; }
+.coordination-usage-body h4 { margin: 10px 0 2px; color: var(--quiet); font-size: var(--text-meta); font-weight: 550; }
+.coordination-usage-model, .coordination-usage-thread { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 26px; }
+.coordination-usage-model { grid-template-columns: 7.5em minmax(0, 1fr) auto; }
+:is(.coordination-usage-model, .coordination-usage-thread) > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coordination-usage-tokens { color: var(--quiet-strong); font-size: var(--text-meta); font-variant-numeric: tabular-nums; }
+.coordination-usage-thread {
+  box-sizing: border-box;
+  width: calc(100% + 16px);
+  margin-left: -8px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.coordination-usage-thread:hover { background: var(--surface-hover); color: var(--ink-soft); }
+.coordination-usage-body > .coordination-more { width: calc(100% + 20px); margin-left: -10px; padding-left: 10px; }
+.right-dock-tabs [role="tab"] > em.attention { border-radius: 6px; padding: 0 6px; background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+
+/* A coordinator's checkouts and pull requests in the session panel, each list scrolling on its own. */
+.session-panel .coordination-section > .subagent-list {
+  max-height: 216px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/** The title's link covers the whole row; the threads named under it sit above that and open themselves. */
+.coordination-pull-request { position: relative; grid-template-columns: 22px minmax(0, 1fr); }
+.coordination-pull-request-open { display: block; min-width: 0; color: inherit; text-decoration: none; }
+.coordination-pull-request-open::after { content: ""; position: absolute; inset: 0; border-radius: 9px; }
+.coordination-pull-request-open > strong { display: block; }
+.coordination-pull-request-open:focus-visible { outline: none; }
+.coordination-pull-request:has(> span > .coordination-pull-request-open:focus-visible:where(:root:not([data-focus-appearance="quiet"]) *)) { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.coordination-pull-request-thread {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: none;
+  color: var(--ink-dim);
+  font: inherit;
+  line-height: 20px;
+  vertical-align: top;
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.coordination-pull-request-thread:hover { color: var(--ink-soft); text-decoration-color: currentColor; }
+.coordination-pull-request small { line-height: 20px; }
+.coordination-pull-request .coordination-row-mark[data-state="open"] { color: var(--success); background: var(--success-surface); }
+.coordination-pull-request .coordination-row-mark[data-state="merged"] { color: var(--pr-merged); }
+.coordination-pull-request .coordination-row-mark[data-state="closed"] { color: var(--danger); background: var(--danger-chip); }
+
+/* A thread under the coordinator, talked to from its tab in the dock. */
+.side-chat.thread-tab { display: flex; flex-direction: column; }
+.thread-tab > .thread-tab-header { flex: 0 0 var(--chrome-head); }
+.thread-tab-resolution > svg { color: var(--muted); }
+.thread-tab-resolution[data-action="resolve"] > svg { color: var(--success); }
+.thread-tab-resolution[data-action="resolve"]:hover:not(:disabled) > svg { color: var(--success-soft); }
+.thread-tab-header[data-standing="review"] .panel-header-text > p { color: var(--success-soft); }
+.thread-tab > .side-chat-transcript { flex: 1 1 0; }
+.thread-tab-mark {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink-dim);
+}
+.thread-tab-mark > .coordination-dot, .thread-tab-mark > .task-spinner {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  box-shadow: 0 0 0 2.5px var(--sunken);
+}
+.thread-tab-mark > .coordination-dot { width: 9px; height: 9px; }
+.thread-tab-mark > .coordination-dot.review { box-shadow: inset 0 0 0 1.6px var(--success), 0 0 0 2.5px var(--sunken); }
+.thread-tab-mark > .coordination-dot.needs-work { box-shadow: inset 0 0 0 1.6px var(--danger), 0 0 0 2.5px var(--sunken); }
+.thread-tab-mark > .task-spinner { width: 11px; height: 11px; }
+.thread-tab-mark.asking, .thread-tab-mark.approval { border-color: var(--accent-line); background: var(--accent-surface); }
+.thread-tab-header:is([data-standing="asking"], [data-standing="approval"]) .panel-header-text > p { color: var(--accent-text); }
+.thread-tab-header:is([data-standing="blocked"], [data-standing="failed"], [data-standing="needs-work"]) .panel-header-text > p { color: var(--danger-soft); }
+.coordination-empty { margin: 0; padding: 14px 16px; }
+/** The thread's checkout and brief as one line of chips, read as part of the header above it. */
+.thread-tab > .thread-tab-header { border-bottom: 0; }
+.thread-tab-strip {
+  flex: none;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 17px 12px 20px;
+}
+.thread-tab-strip > a.btn { text-decoration: none; }
+.thread-tab-strip > .btn > svg { color: var(--muted); }
+.thread-tab-strip > .btn[data-variant="ghost"] > svg { color: var(--quiet-strong); }
+.thread-tab-strip > .btn.scheduled > svg { color: var(--info); }
+.thread-tab-branch code { min-width: 0; max-width: 160px; overflow: hidden; color: var(--ink-dim); font: var(--text-meta)/1 var(--mono); text-overflow: ellipsis; }
+.thread-tab-strip > .thread-tab-branch > svg:last-child { color: var(--quiet); }
+.thread-tab-strip > .thread-tab-pull-request[data-state="open"] > svg { color: var(--success); }
+.thread-tab-strip > .thread-tab-pull-request[data-state="merged"] > svg { color: var(--pr-merged); }
+.thread-tab-strip > .thread-tab-pull-request[data-state="closed"] > svg { color: var(--danger); }
+.thread-tab-note { min-width: 0; overflow: hidden; color: var(--quiet); font-size: var(--text-meta); text-overflow: ellipsis; white-space: nowrap; }
+.thread-tab-note.failed { display: inline-flex; align-items: center; gap: 6px; height: 28px; border: 1px solid var(--danger-line); border-radius: 8px; padding: 0 2px 0 9px; background: var(--danger-surface); color: var(--danger-soft); }
+.thread-tab-note.failed > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thread-tab-brief-toggle { margin-left: auto; }
+.thread-tab-strip > .thread-tab-brief-toggle > svg:last-child { color: var(--quiet); transition: transform 140ms ease; }
+.thread-tab-brief-toggle[aria-expanded="true"] > svg:last-child { transform: rotate(180deg); }
+.thread-tab-brief-card {
+  flex: none;
+  max-height: 40%;
+  overflow: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  padding: 14px 20px 16px;
+  animation: brief-in 140ms ease-out;
+}
+@keyframes brief-in { from { opacity: 0; transform: translateY(-4px); } }
+.thread-tab-brief-card blockquote {
+  margin: 0;
+  border-left: 2px solid var(--accent-line);
+  padding-left: 12px;
+  color: var(--ink-soft);
+  font-size: var(--text-menu);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.thread-tab-brief-card dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; margin: 14px 0 0; }
+.thread-tab-brief-card dt { color: var(--quiet); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.thread-tab-brief-card dd { margin: 4px 0 0; color: var(--ink-dim); font-size: var(--text-meta); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }

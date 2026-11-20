@@ -1,0 +1,225 @@
+/**
+ * The right dock as data: one per thread, the tabs it holds, and which of them the keyboard is in.
+ * Nothing here reaches back into the workspace at runtime, so the state module can own the record
+ * while the tab arithmetic every command does lives in one place.
+ */
+import type { BrowserTab } from "../domain/browser.js";
+import type { TerminalSession } from "../domain/terminal.js";
+import type { SideChat } from "./workspace-state.js";
+
+/**
+ * One thread's right dock: whether it is showing, which panels are open as tabs, which tab is on top,
+ * and the pages and shells that thread opened. A page and a shell belong to the thread that asked for
+ * one, so a run drives its own dock and never the dock of whichever thread the user is looking at.
+ * Only the records live here. What a page holds and what a shell has printed never become state.
+ */
+export type ThreadDock = {
+  open: boolean;
+  /** Whether the dock is taking the whole workspace, which only a dock that is showing ever does. */
+  expanded: boolean;
+  panels: string[];
+  tab: string;
+  /** The workflow the dock's workflow panel is following, kept per thread the way its panels are. */
+  workflowId: string | null;
+  browserTabs: BrowserTab[];
+  browserTabId: string | null;
+  terminals: TerminalSession[];
+  terminalId: string | null;
+  /** The simulator this dock's Simulator panel shows, once one was picked or opened. */
+  simulatorId: string | null;
+  /** Threads working under this dock's coordinator, each opened as a tab to follow and talk to beside it. */
+  threadTabs: string[];
+  /** Per panel, the thread tab it shows in place of the dock's own thread. */
+  subjects: Record<string, string>;
+};
+
+/** What a dock helper needs of the workspace: whose dock is in front, and every dock there is. */
+export type DockState = {
+  currentId: string | null;
+  sideChats: SideChat[];
+  docks: Record<string, ThreadDock>;
+  keyboardTab: string | null;
+};
+
+/** The dock tab that offers the panels, shown whenever no panel is on top. */
+export const DOCK_PICKER = "home";
+
+/** The dock the app shows while no thread is current, so a draft has a dock of its own too. */
+export const DRAFT_DOCK = "draft";
+
+export const EMPTY_DOCK: ThreadDock = {
+  open: false,
+  expanded: false,
+  panels: [],
+  tab: DOCK_PICKER,
+  workflowId: null,
+  browserTabs: [],
+  browserTabId: null,
+  terminals: [],
+  terminalId: null,
+  simulatorId: null,
+  threadTabs: [],
+  subjects: {},
+};
+
+/**
+ * Whose dock a command belongs in: the thread it names, else the one the user is looking at. A side
+ * chat is a tab within its source thread's dock, so its own commands land in that same dock.
+ */
+export function dockOwner(state: Pick<DockState, "currentId" | "sideChats">, threadId?: string | null): string {
+  const id = threadId ?? state.currentId;
+  if (!id) return DRAFT_DOCK;
+  return state.sideChats.find((chat) => chat.id === id)?.sourceThreadId ?? id;
+}
+
+export function dockFor(state: Pick<DockState, "docks">, owner: string): ThreadDock {
+  return state.docks[owner] ?? EMPTY_DOCK;
+}
+
+/** The thread tab a dock's panel is about, while that tab is still open. */
+export function dockSubject(state: Pick<DockState, "docks">, owner: string, panel: string): string | null {
+  const dock = dockFor(state, owner);
+  const subject = dock.subjects[panel];
+  return subject !== undefined && dock.threadTabs.includes(subject) ? subject : null;
+}
+
+/** The dock tab the review is drawn in, which the picker and the composer both name. */
+export const DIFF_PANEL = "diff";
+
+/** The dock tab a thread's schedule is edited in. */
+export const AUTOMATION_PANEL = "automation";
+
+/** The dock tab one workflow is followed in. */
+export const WORKFLOW_PANEL = "workflow";
+
+/** The dock tab the iOS simulator is shown and driven in. */
+export const SIMULATOR_PANEL = "simulator";
+
+/** A coordinator's threads, grouped by what they need. It leads a coordinator's dock and does not close. */
+export const OVERVIEW_PANEL = "overview";
+
+/** The dock in front, and whose it is: the pair every view command starts from. */
+export function frontDock(state: Pick<DockState, "currentId" | "sideChats" | "docks">): { owner: string; dock: ThreadDock } {
+  const owner = dockOwner(state);
+  return { owner, dock: dockFor(state, owner) };
+}
+
+/** The thread tab the dock in front is showing, while it shows one. */
+export function shownThreadTab(state: Pick<DockState, "currentId" | "sideChats" | "docks">): string | null {
+  const { dock } = frontDock(state);
+  return dock.open && dock.threadTabs.includes(dock.tab) ? dock.tab : null;
+}
+
+export function withDock<S extends Pick<DockState, "docks">>(state: S, owner: string, patch: Partial<ThreadDock>): S {
+  return { ...state, docks: { ...state.docks, [owner]: { ...dockFor(state, owner), ...patch } } };
+}
+
+/** Which dock holds a page or a shell, for the events and commands that only name its id. */
+export function ownerOfBrowserTab(state: Pick<DockState, "docks">, tabId: string): string | undefined {
+  return Object.keys(state.docks).find((owner) => state.docks[owner].browserTabs.some((tab) => tab.id === tabId));
+}
+
+export function ownerOfTerminal(state: Pick<DockState, "docks">, terminalId: string): string | undefined {
+  return Object.keys(state.docks).find((owner) => state.docks[owner].terminals.some((terminal) => terminal.id === terminalId));
+}
+
+/** The forks a dock draws as tabs: the ones taken from the thread that owns it. */
+export function dockSideChats(state: Pick<DockState, "sideChats">, owner: string) {
+  return state.sideChats.filter((chat) => chat.sourceThreadId === owner);
+}
+
+/**
+ * What a dock tab is showing. A page and a shell are tabs in their own right rather than tabs within
+ * a panel, so `tab` names one of them directly and there is one strip in the app, not two.
+ */
+export function dockTabKind(state: DockState, owner: string, tab: string) {
+  const dock = dockFor(state, owner);
+  if (dock.browserTabs.some((page) => page.id === tab)) return "browser" as const;
+  if (dock.terminals.some((terminal) => terminal.id === tab)) return "terminal" as const;
+  if (dockSideChats(state, owner).some((chat) => chat.id === tab)) return "side-chat" as const;
+  if (dock.threadTabs.includes(tab)) return "thread" as const;
+  return dock.panels.includes(tab) ? "panel" as const : "picker" as const;
+}
+
+/** Every tab in the dock, in the order the strip draws them. */
+export function dockTabIds(state: Pick<DockState, "docks" | "sideChats">, owner: string) {
+  const dock = dockFor(state, owner);
+  return [
+    ...dock.panels,
+    ...dock.browserTabs.map((page) => page.id),
+    ...dock.terminals.map((terminal) => terminal.id),
+    ...dockSideChats(state, owner).map((chat) => chat.id),
+    ...dock.threadTabs,
+  ];
+}
+
+/**
+ * A dock tab holds the keyboard only while the dock in front is open and still has that tab. This is
+ * deliberately not "is the tab in front": focus lands on a tab's button before the click that selects
+ * it, so requiring that would throw the report away the instant it arrived.
+ */
+export function dockHoldsTab(state: DockState, tab: string): boolean {
+  const { owner, dock } = frontDock(state);
+  if (!dock.open) return false;
+  return dock.panels.includes(tab)
+    || dock.browserTabs.some((page) => page.id === tab)
+    || dock.terminals.some((terminal) => terminal.id === tab)
+    || dockSideChats(state, owner).some((chat) => chat.id === tab)
+    || dock.threadTabs.includes(tab);
+}
+
+/**
+ * Which dock holds a thread as a tab of its own: a side chat's source, or the coordinator that has
+ * the thread open. A thread shown this way is talked to there rather than landed on.
+ */
+export function tabHolderOf(state: Pick<DockState, "sideChats" | "docks">, taskId: string): string | undefined {
+  const chat = state.sideChats.find((item) => item.id === taskId);
+  if (chat) return chat.sourceThreadId;
+  return Object.keys(state.docks).find((owner) => state.docks[owner].threadTabs.includes(taskId));
+}
+
+/** The thread whose tab holds the keyboard, when the tab holding it is a conversation. */
+export function keyboardThreadId(state: DockState): string | null {
+  const tab = state.keyboardTab;
+  if (!tab) return null;
+  const kind = dockTabKind(state, dockOwner(state), tab);
+  return kind === "side-chat" || kind === "thread" ? tab : null;
+}
+
+/** The shell holding the keyboard, when the tab holding it is one. ⌘J is about shells, not panels. */
+export function keyboardTerminalId(state: DockState): string | null {
+  const tab = state.keyboardTab;
+  return tab && dockTabKind(state, dockOwner(state), tab) === "terminal" ? tab : null;
+}
+
+/** Which tab takes over when `tab` closes: its neighbour on the left, else on the right, else the picker. */
+export function dockTabAfterClosing(state: Pick<DockState, "docks" | "sideChats">, owner: string, tab: string) {
+  const tabs = dockTabIds(state, owner);
+  const index = tabs.indexOf(tab);
+  if (index === -1) return dockFor(state, owner).tab;
+  const remaining = tabs.filter((id) => id !== tab);
+  return remaining[index - 1] ?? remaining[index] ?? DOCK_PICKER;
+}
+
+export function activeBrowserTab(dock: ThreadDock) {
+  return dock.browserTabs.find((tab) => tab.id === dock.browserTabId);
+}
+
+/** Which tab a browser command acts on: the one it names, else the one that dock is showing. */
+export function browserTarget(dock: ThreadDock, tabId: string | undefined) {
+  return tabId === undefined ? activeBrowserTab(dock) : dock.browserTabs.find((tab) => tab.id === tabId);
+}
+
+export function activeTerminal(dock: ThreadDock) {
+  return dock.terminals.find((terminal) => terminal.id === dock.terminalId);
+}
+
+/**
+ * Which terminal a read acts on: the one it names, else the one the asking thread opened, else the
+ * one its dock is showing. A thread with a shell of its own never reads somebody else's by accident.
+ */
+export function terminalTarget(dock: ThreadDock, terminalId: string | undefined, threadId?: string) {
+  if (terminalId !== undefined) return dock.terminals.find((terminal) => terminal.id === terminalId);
+  const own = threadId === undefined ? undefined : dock.terminals.reduceRight<TerminalSession | undefined>((found, terminal) => found ?? (terminal.taskId === threadId ? terminal : undefined), undefined);
+  return own ?? activeTerminal(dock);
+}

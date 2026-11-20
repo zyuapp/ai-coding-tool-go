@@ -1,0 +1,748 @@
+import { BUILT_IN_MODELS, capabilitiesFor, currentModel, isAgentEffort, isAgentEngine, isModelId, modelEngine, type AgentEngine } from "./agent-engine.js";
+import type { Annotation, AttachedFile, ConversationMessage, ConversationMessageKind, PastedText } from "./conversation.js";
+import { legacyOrigin, type MessageOrigin } from "./message-origin.js";
+import type { AutomationFinding } from "./finding.js";
+import { isProject, legacyProjectId, normalizeProjectRoot, type Project } from "./project.js";
+import { isExecutionPolicy, type Continuation, type ExecutionPolicy, type Subagent } from "./run.js";
+import { isThreadUsage, type ContextUsage, type ContinuationStatus, type ThreadOutcome } from "./thread-run.js";
+import { threadLastOutputAt, type Thread } from "./thread.js";
+import { isThreadRole } from "./thread-role.js";
+import { isCaughtStarts, isCoordinationNote, isCoordinationReport, isCoordinatorMemory, isDecision, isHeldLead, isRemoteHeard, isRemoteStops, isRemoteWorking, isThreadBrief, isThreadModelChoice, isThreadProposal } from "./coordination.js";
+import { isWorktree, type Worktree } from "./worktree.js";
+import { isResourceStop } from "./session-resources.js";
+import { isLimitPause } from "./usage-limit.js";
+import { isPullRequestLink } from "./pull-request.js";
+
+export const THREAD_STORE_VERSION = 2 as const;
+
+/** Every thread written before the engine was recorded ran on Claude. */
+const UNRECORDED_ENGINE: AgentEngine = "claude";
+
+/**
+ * A thread as the store holds it. The helper agents it delegated to are saved beside it and travel
+ * with it on the way in; the workspace lifts them into a feed of their own once it has them. A thread
+ * saved before threads were ranked has no rank until it is restored.
+ */
+export type StoredThread = Omit<Thread, "rankedAt"> & { rankedAt?: number; subagents?: Subagent[] };
+
+export type ThreadStoreData = {
+  version: typeof THREAD_STORE_VERSION;
+  tasks: StoredThread[];
+  projects: Project[];
+  worktrees: Worktree[];
+  lastFolder: string | null;
+};
+
+export type StorageValues = {
+  tasks: string | null;
+  projects: string | null;
+  /** Absent in everything written before a checkout could hold more than one thread. */
+  worktrees: string | null;
+  lastFolder: string | null;
+};
+
+export type ThreadStoreParseResult =
+  | {
+      ok: true;
+      data: ThreadStoreData;
+      /** Threads this build cannot read, which stay on disk untouched. */
+      hiddenTasks: number;
+      sourceVersion: 0 | 1 | 2;
+      preservedV1: StorageValues | null;
+    }
+  | {
+      ok: false;
+      canWrite: false;
+      sourceVersion: 0 | 1 | 2;
+      errorKind: "corrupt" | "storage";
+      errors: string[];
+      preservedV1: StorageValues | null;
+      raw: StorageValues;
+    };
+
+const LEGACY_MODES = {
+  default: "confirm",
+  plan: "plan",
+  acceptEdits: "allow-edits",
+  auto: "autonomous",
+} as const satisfies Record<string, ExecutionPolicy>;
+
+type LegacyMode = keyof typeof LEGACY_MODES;
+
+type VersionedValue<T> = {
+  version: typeof THREAD_STORE_VERSION;
+  value: T;
+};
+
+type DecodedThreadStore = {
+  tasks: unknown;
+  projects: unknown;
+  worktrees: unknown;
+  lastFolder: unknown;
+};
+
+type ThreadStoreValidationResult =
+  | { ok: true; data: ThreadStoreData; hiddenTasks: number }
+  | { ok: false; errors: string[] };
+
+export type SerializedThreadStore = StorageValues;
+
+export function parseThreadStore(raw: StorageValues): ThreadStoreParseResult {
+  if (isEmpty(raw)) {
+    return {
+      ok: true,
+      data: { version: THREAD_STORE_VERSION, tasks: [], projects: [], worktrees: [], lastFolder: null },
+      hiddenTasks: 0,
+      sourceVersion: 0,
+      preservedV1: null,
+    };
+  }
+  const decoded = decodeV2(raw);
+  if (decoded.kind === "v2") {
+    const validated = validateThreadStoreData(decoded.values);
+    return validated.ok
+      ? { ...validated, sourceVersion: 2, preservedV1: null }
+      : corrupt(2, validated.errors, raw);
+  }
+  if (decoded.kind === "corrupt") {
+    return {
+      ok: false,
+      canWrite: false,
+      sourceVersion: 2,
+      errorKind: "corrupt",
+      errors: decoded.errors,
+      preservedV1: null,
+      raw,
+    };
+  }
+  return migrateV1ToV2(raw);
+}
+
+export function migrateV1ToV2(raw: StorageValues): ThreadStoreParseResult {
+  const errors: string[] = [];
+  const tasksValue = parseJson(raw.tasks, "tasks", errors);
+  const projectsValue = parseJson(raw.projects, "projects", errors);
+  const lastFolder = parseLegacyLastFolder(raw.lastFolder, errors);
+  if (errors.length) return corrupt(1, errors, raw);
+
+  if (tasksValue !== null && !Array.isArray(tasksValue)) errors.push("tasks must be an array");
+  if (projectsValue !== null && !Array.isArray(projectsValue)) errors.push("projects must be an array");
+  if (errors.length) return corrupt(1, errors, raw);
+
+  const legacyProjectsValue = Array.isArray(projectsValue) ? projectsValue : [];
+  const legacyProjects = legacyProjectsValue.filter((value): value is string => typeof value === "string" && value.length > 0);
+  if (legacyProjectsValue.some((value) => typeof value !== "string")) errors.push("projects must contain only strings");
+  if (errors.length) return corrupt(1, errors, raw);
+  const legacyTasks = Array.isArray(tasksValue) ? tasksValue : [];
+  const roots = new Set(legacyProjects.map(normalizeProjectRoot));
+  for (const value of legacyTasks) {
+    if (!isRecord(value)) {
+      errors.push("tasks contains a non-object value");
+      continue;
+    }
+    if (typeof value.folder === "string" && value.folder) roots.add(normalizeProjectRoot(value.folder));
+  }
+
+  const projects = [...roots].map((root) => ({ id: legacyProjectId(root), root }));
+  const projectByRoot = new Map(projects.map((project) => [project.root, project.id]));
+  const tasks: StoredThread[] = [];
+  for (const [index, value] of legacyTasks.entries()) {
+    const task = migrateLegacyThread(value, index, projectByRoot, errors);
+    if (task) tasks.push(task);
+  }
+  if (errors.length) return corrupt(1, errors, raw);
+
+  return {
+    ok: true,
+    data: { version: THREAD_STORE_VERSION, tasks, projects, worktrees: [], lastFolder },
+    hiddenTasks: 0,
+    sourceVersion: 1,
+    preservedV1: raw,
+  };
+}
+
+export function serializeThreadStore(data: ThreadStoreData): SerializedThreadStore {
+  return {
+    tasks: JSON.stringify(versioned(data.tasks)),
+    projects: JSON.stringify(versioned(data.projects)),
+    worktrees: JSON.stringify(versioned(data.worktrees)),
+    lastFolder: JSON.stringify(versioned(data.lastFolder)),
+  };
+}
+
+function migrateLegacyThread(
+  value: unknown,
+  index: number,
+  projectByRoot: Map<string, string>,
+  errors: string[],
+): StoredThread | null {
+  if (!isRecord(value)) {
+    errors.push(`tasks[${index}] must be an object`);
+    return null;
+  }
+  if (typeof value.id !== "string" || !value.id) errors.push(`tasks[${index}].id must be a non-empty string`);
+  if (typeof value.title !== "string") errors.push(`tasks[${index}].title must be a string`);
+  if (typeof value.folder !== "string") errors.push(`tasks[${index}].folder must be a string`);
+  if (!isLegacyMode(value.mode)) errors.push(`tasks[${index}].mode is invalid`);
+  if (!Array.isArray(value.messages)) errors.push(`tasks[${index}].messages must be an array`);
+  if (!Array.isArray(value.changedFiles) || value.changedFiles.some((file) => typeof file !== "string")) {
+    errors.push(`tasks[${index}].changedFiles must be an array of strings`);
+  }
+  if (typeof value.updatedAt !== "number" || !Number.isFinite(value.updatedAt)) errors.push(`tasks[${index}].updatedAt must be a number`);
+  const messages = migrateMessages(value.messages, index, errors);
+  if (
+    typeof value.id !== "string" || !value.id ||
+    typeof value.title !== "string" ||
+    typeof value.folder !== "string" ||
+    !isLegacyMode(value.mode) ||
+    !Array.isArray(value.changedFiles) ||
+    typeof value.updatedAt !== "number" || !Number.isFinite(value.updatedAt) ||
+    !messages
+  ) return null;
+
+  const continuationStatus = continuationStatusFor(value.sessionId);
+  const continuation = continuationStatus === "available" ? toContinuation(UNRECORDED_ENGINE, value.sessionId) : undefined;
+  return {
+    id: value.id,
+    title: value.title,
+    ...(value.folder ? { projectId: projectByRoot.get(normalizeProjectRoot(value.folder)) ?? legacyProjectId(value.folder) } : {}),
+    executionPolicy: LEGACY_MODES[value.mode],
+    engine: UNRECORDED_ENGINE,
+    messages,
+    ...(continuation ? { continuation } : {}),
+    continuationStatus,
+    lastChangeSnapshot: { files: value.changedFiles, capturedAt: value.updatedAt },
+    updatedAt: value.updatedAt,
+  };
+}
+
+function migrateMessages(value: unknown, taskIndex: number, errors: string[]) {
+  if (!Array.isArray(value)) return null;
+  const messages: ConversationMessage[] = [];
+  for (const [index, message] of value.entries()) {
+    if (!isRecord(message) || typeof message.id !== "string" || typeof message.kind !== "string" || !isMessageKind(message.kind) || typeof message.text !== "string" || typeof message.at !== "number" || !Number.isFinite(message.at) || (message.detail !== undefined && typeof message.detail !== "string")) {
+      errors.push(`tasks[${taskIndex}].messages[${index}] is invalid`);
+      continue;
+    }
+    messages.push(labelledOrigin({ id: message.id, kind: message.kind, text: message.text, ...(message.detail === undefined ? {} : { detail: message.detail }), at: message.at }) as ConversationMessage);
+  }
+  return messages;
+}
+
+function decodeV2(raw: StorageValues):
+  | { kind: "none" }
+  | { kind: "v2"; values: DecodedThreadStore }
+  | { kind: "corrupt"; errors: string[] } {
+  if (isEmpty(raw)) return { kind: "none" };
+  const errors: string[] = [];
+  const tasks = parseJson(raw.tasks, "tasks", errors);
+  const projects = parseJson(raw.projects, "projects", errors);
+  const worktrees = parseJson(raw.worktrees, "worktrees", errors);
+  const lastFolder = parseJson(raw.lastFolder, "lastFolder", errors);
+  const hasV2Marker = [tasks, projects, lastFolder].some((value) => isRecord(value) && value.version === THREAD_STORE_VERSION);
+  if (!hasV2Marker) return { kind: "none" };
+  if (errors.length) return { kind: "corrupt", errors };
+  if (![tasks, projects, lastFolder].every((value) => isRecord(value) && value.version === THREAD_STORE_VERSION && "value" in value)) {
+    return { kind: "corrupt", errors: ["version 2 storage must contain all three versioned values"] };
+  }
+  /** Storage written before checkouts had records of their own has none; the tasks still carry them. */
+  if (worktrees !== null && !(isRecord(worktrees) && worktrees.version === THREAD_STORE_VERSION && "value" in worktrees)) {
+    return { kind: "corrupt", errors: ["version 2 worktrees is not a versioned value"] };
+  }
+  return {
+    kind: "v2",
+    values: {
+      tasks: (tasks as { value: unknown }).value,
+      projects: (projects as { value: unknown }).value,
+      worktrees: worktrees === null ? null : (worktrees as { value: unknown }).value,
+      lastFolder: (lastFolder as { value: unknown }).value,
+    },
+  };
+}
+
+/**
+ * Validates v2 values that have already been decoded from their storage transport. A thread this
+ * build cannot read is counted and left out rather than failing the store: its record stays on disk
+ * for the build that wrote it, and the threads around it still open.
+ */
+export function validateThreadStoreData(values: DecodedThreadStore): ThreadStoreValidationResult {
+  const errors: string[] = [];
+  let hiddenTasks = 0;
+  if (!Array.isArray(values.tasks)) errors.push("v2 tasks must be an array");
+  if (!Array.isArray(values.projects)) errors.push("v2 projects must be an array");
+  if (values.worktrees !== null && !Array.isArray(values.worktrees)) errors.push("v2 worktrees must be an array");
+  if (values.lastFolder !== null && typeof values.lastFolder !== "string") errors.push("v2 lastFolder must be a string or null");
+  const projects = Array.isArray(values.projects) ? values.projects.filter(isProject) : [];
+  const stored = Array.isArray(values.worktrees) ? values.worktrees.filter(isWorktree) : [];
+  if (Array.isArray(values.worktrees) && stored.length !== values.worktrees.length) errors.push("v2 worktrees contains an invalid value");
+  const lifted: Worktree[] = [];
+  const readable = Array.isArray(values.tasks) ? values.tasks.map((value) => sanitizeV2Thread(value, lifted)) : [];
+  const tasks = readable.filter((task): task is StoredThread => task !== null);
+  hiddenTasks += readable.length - tasks.length;
+  if (Array.isArray(values.projects) && projects.length !== values.projects.length) errors.push("v2 projects contains an invalid value");
+  const projectIds = new Set(projects.map((project) => project.id));
+  const placed = tasks.filter((task) => !task.projectId || projectIds.has(task.projectId));
+  hiddenTasks += tasks.length - placed.length;
+  if (errors.length) return { ok: false, errors };
+  const worktreesById = new Map<string, Worktree>();
+  for (const worktree of stored) {
+    if (!worktreesById.has(worktree.id)) worktreesById.set(worktree.id, worktree);
+  }
+  for (const worktree of lifted) {
+    if (!worktreesById.has(worktree.id)) worktreesById.set(worktree.id, worktree);
+  }
+  const worktrees = [...worktreesById.values()].filter((worktree) => projectIds.has(worktree.projectId));
+  const worktreeIds = new Set(worktrees.map((worktree) => worktree.id));
+  return {
+    ok: true,
+    hiddenTasks,
+    data: { version: THREAD_STORE_VERSION, tasks: placed.map((task) => claiming(task, worktreeIds)), projects, worktrees, lastFolder: values.lastFolder as string | null },
+  };
+}
+
+/** A thread saved before threads were ranked ranks by when it last spoke, which is where the list last showed it. */
+export function rankedThread<T extends Omit<StoredThread, "subagents">>(thread: T): T & Thread {
+  return (thread.rankedAt === undefined ? { ...thread, rankedAt: threadLastOutputAt(thread) } : thread) as T & Thread;
+}
+
+/**
+ * A reference to a checkout that is not there is dropped rather than refusing the whole store: a
+ * reconcile removes a checkout the moment nothing claims it, and a crash in that window would
+ * otherwise leave the user unable to write anything at all.
+ */
+function claiming(task: StoredThread, worktreeIds: Set<string>): StoredThread {
+  if (!task.worktreeId || worktreeIds.has(task.worktreeId)) return task;
+  const { worktreeId: _gone, worktreeEnteredAt: _forked, ...local } = task;
+  return local;
+}
+
+/**
+ * Threads written while a checkout belonged to exactly one thread carry it inside themselves. Lifting
+ * one out gives it a record of its own; the fork the thread had already made stays with the thread.
+ * A checkout on a thread with no project has nowhere to be listed, so it is left to be reaped.
+ */
+function liftEmbeddedWorktree(value: Record<string, any>, lifted: Worktree[]) {
+  if (!isRecord(value.worktree)) return value;
+  const { worktree, ...task } = value;
+  const { enteredAt, ...record } = worktree;
+  const candidate = { ...record, projectId: task.projectId };
+  if (!isWorktree(candidate)) return task;
+  lifted.push(candidate);
+  return { ...task, worktreeId: candidate.id, ...(finiteNumber(enteredAt) ? { worktreeEnteredAt: enteredAt } : {}) };
+}
+
+function parseJson(value: string | null, label: string, errors: string[]): unknown | null {
+  if (value === null) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    errors.push(`${label} is not valid JSON`);
+    return null;
+  }
+}
+
+function parseLegacyLastFolder(value: string | null, errors: string[]) {
+  if (value === null || typeof value === "string") return value;
+  errors.push("lastFolder must be a string or null");
+  return null;
+}
+
+function corrupt(sourceVersion: 1 | 2, errors: string[], raw: StorageValues): ThreadStoreParseResult {
+  return { ok: false, canWrite: false, sourceVersion, errorKind: "corrupt", errors, preservedV1: sourceVersion === 1 ? raw : null, raw };
+}
+
+function versioned<T>(value: T): VersionedValue<T> {
+  return { version: THREAD_STORE_VERSION, value };
+}
+
+function continuationStatusFor(value: unknown): ContinuationStatus {
+  if (value === undefined) return "none";
+  return typeof value === "string" && value.trim() ? "available" : "invalid";
+}
+
+function toContinuation(engine: AgentEngine, value: unknown): Continuation {
+  return { provider: engine, value: String(value) };
+}
+
+function isLegacyMode(value: unknown): value is LegacyMode {
+  return typeof value === "string" && value in LEGACY_MODES;
+}
+
+function isMessageKind(value: string): value is ConversationMessageKind {
+  return value === "user" || value === "assistant" || value === "tool" || value === "system";
+}
+
+function isThreadBase(value: unknown): value is StoredThread {
+  return isRecord(value) &&
+    droppableFieldsReadable(value) &&
+    nonEmptyString(value.id) &&
+    nonEmptyString(value.title) &&
+    (value.titleByUser === undefined || typeof value.titleByUser === "boolean") &&
+    (value.role === undefined || isThreadRole(value.role)) &&
+    (value.parentId === undefined || nonEmptyString(value.parentId)) &&
+    (value.decisions === undefined || Array.isArray(value.decisions) && value.decisions.every(isDecision)) &&
+    (value.coordinationNotes === undefined || Array.isArray(value.coordinationNotes) && value.coordinationNotes.every(isCoordinationNote)) &&
+    (value.projectId === undefined || nonEmptyString(value.projectId)) &&
+    isExecutionPolicy(value.executionPolicy) &&
+    isAgentEngine(value.engine) &&
+    (value.model === undefined || isModelId(value.model) && (modelEngine(BUILT_IN_MODELS, value.model, value.engine) ?? value.engine) === value.engine) &&
+    (value.fastMode === undefined || capabilitiesFor(value.engine).fastMode && typeof value.fastMode === "boolean") &&
+    (value.effort === undefined || isAgentEffort(value.effort)) &&
+    (value.contextUsage === undefined || isContextUsage(value.contextUsage)) &&
+    Array.isArray(value.messages) &&
+    value.messages.every(isConversationMessage) &&
+    (value.subagents === undefined || Array.isArray(value.subagents) && value.subagents.every(isSubagent)) &&
+    isRecord(value.lastChangeSnapshot) && Array.isArray(value.lastChangeSnapshot.files) && value.lastChangeSnapshot.files.every((file) => typeof file === "string") && finiteNumber(value.lastChangeSnapshot.capturedAt) &&
+    (value.sortIndex === undefined || finiteNumber(value.sortIndex)) &&
+    (value.outcome === undefined || isThreadOutcome(value.outcome)) &&
+    (value.outcomeUnread === undefined || value.outcomeUnread === true) &&
+    (value.findings === undefined || Array.isArray(value.findings) && value.findings.every(isAutomationFinding)) &&
+    (value.lastFindingAt === undefined || finiteNumber(value.lastFindingAt)) &&
+    (value.handledIssues === undefined || Array.isArray(value.handledIssues) && value.handledIssues.every((key: unknown) => nonEmptyString(key))) &&
+    (value.snoozedUntil === undefined || finiteNumber(value.snoozedUntil) && value.snoozedUntil > 0) &&
+    (value.resourceStop === undefined || isResourceStop(value.resourceStop)) &&
+    (value.limitPause === undefined || isLimitPause(value.limitPause) && (value.limitPause.held ?? []).every(isHeldMessage)) &&
+    (value.lastChecked === undefined || (isRecord(value.lastChecked) && finiteNumber(value.lastChecked.at) && nonEmptyString(value.lastChecked.note))) &&
+    (value.worktreeId === undefined || nonEmptyString(value.worktreeId)) &&
+    (value.worktreeEnteredAt === undefined || finiteNumber(value.worktreeEnteredAt)) &&
+    (value.inheritedContinuation === undefined || value.inheritedContinuation === true) &&
+    (value.runEndedAt === undefined || finiteNumber(value.runEndedAt)) &&
+    (value.runEndedAs === undefined || isThreadOutcome(value.runEndedAs)) &&
+    (value.createdAt === undefined || finiteNumber(value.createdAt)) &&
+    (value.rankedAt === undefined || finiteNumber(value.rankedAt)) &&
+    finiteNumber(value.updatedAt) &&
+    (value.archivedAt === undefined || finiteNumber(value.archivedAt));
+}
+
+function isAutomationFinding(value: unknown): value is AutomationFinding {
+  return isRecord(value) &&
+    nonEmptyString(value.id) &&
+    nonEmptyString(value.headline) &&
+    (value.detail === undefined || typeof value.detail === "string") &&
+    (value.key === undefined || nonEmptyString(value.key)) &&
+    finiteNumber(value.at) &&
+    (value.read === undefined || value.read === true);
+}
+
+function isThreadOutcome(value: unknown): value is ThreadOutcome {
+  return value === "finished" || value === "failed" || value === "stopped";
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+/**
+ * Threads written before the picker dropped "default" and the context window; both fall back to the
+ * current defaults. The attention dot they may also carry is ephemeral, so it is retired unread.
+ */
+function dropRetiredSettings(value: unknown) {
+  if (!isRecord(value)) return value;
+  if (value.contextWindow === undefined && value.attention === undefined && value.attentionRead === undefined && value.model !== "default") return value;
+  const { contextWindow: _retired, attention: _dot, attentionRead: _read, ...task } = value;
+  if (task.model === "default") delete task.model;
+  return task;
+}
+
+/**
+ * Threads written while a withdrawn message was called `quiet`, a handled issue a `silencedKeys` entry,
+ * a coordinator's waiting notes `crewNotes`, or a model had an id the catalogue has since replaced.
+ * Whatever the thread already carries under the current name wins.
+ */
+function renamedFields(value: unknown) {
+  if (!isRecord(value)) return value;
+  let task = value;
+  const model = currentModel(task.model);
+  if (model !== task.model) task = { ...task, model };
+  const usage = currentUsage(task.usage);
+  if (usage !== task.usage) task = { ...task, usage };
+  const threadModel = isRecord(task.threadModel) ? currentModel(task.threadModel.model) : undefined;
+  if (threadModel !== undefined && threadModel !== task.threadModel.model) task = { ...task, threadModel: { ...task.threadModel, model: threadModel } };
+  if (Array.isArray(task.proposals)) {
+    const before: unknown[] = task.proposals;
+    const proposals = before.map((proposal) => isRecord(proposal) && proposal.model !== undefined && currentModel(proposal.model) !== proposal.model ? { ...proposal, model: currentModel(proposal.model) } : proposal);
+    if (proposals.some((proposal, index) => proposal !== before[index])) task = { ...task, proposals };
+  }
+  if (value.silencedKeys !== undefined) {
+    const { silencedKeys: handled, ...renamed } = value;
+    if (renamed.handledIssues === undefined) renamed.handledIssues = handled;
+    task = renamed;
+  }
+  if (task.crewNotes !== undefined) {
+    const { crewNotes: notes, ...renamed } = task;
+    if (renamed.coordinationNotes === undefined) renamed.coordinationNotes = notes;
+    task = renamed;
+  }
+  const limitPause = heldWithOrigins(task.limitPause);
+  if (limitPause !== task.limitPause) task = { ...task, limitPause };
+  if (Array.isArray(task.messages)) {
+    let messages: unknown[] | null = null;
+    for (let index = 0; index < task.messages.length; index += 1) {
+      const message = task.messages[index];
+      const renamed = renamedMessageFields(message);
+      if (renamed !== message) messages ??= task.messages.slice(0, index);
+      messages?.push(renamed);
+    }
+    if (messages) task = { ...task, messages };
+  }
+  return task;
+}
+
+/**
+ * What a thread spent, counted toward the model each spend is now known as. A model the catalogue
+ * does not hold, such as one an engine named for itself, keeps its count; only a malformed id is dropped.
+ */
+function currentUsage(value: unknown) {
+  if (!isRecord(value)) return value;
+  const entries = Object.entries(value);
+  if (entries.every(([model]) => isModelId(model) && currentModel(model) === model)) return value;
+  const usage: Record<string, unknown> = {};
+  for (const [recorded, tokens] of entries) {
+    const model = currentModel(recorded);
+    if (!isModelId(model)) continue;
+    const counted = usage[model];
+    usage[model] = typeof counted === "number" && typeof tokens === "number" ? counted + tokens : tokens;
+  }
+  return usage;
+}
+
+function renamedMessageFields(value: unknown) {
+  if (!isRecord(value)) return value;
+  const labelled = labelledOrigin(value);
+  if (labelled.quiet === undefined) return labelled;
+  const { quiet: withdrawn, ...message } = labelled;
+  return message.withdrawn === undefined ? { ...message, withdrawn } : message;
+}
+
+/** A user message an older build labelled gets the origin its label names. A held message is always the user kind. */
+function labelledOrigin(value: Record<string, unknown>) {
+  const user = value.kind === undefined || value.kind === "user";
+  return user && value.origin === undefined && typeof value.detail === "string" ? { ...value, origin: legacyOrigin(value.detail) } : value;
+}
+
+function heldWithOrigins(pause: unknown) {
+  if (!isRecord(pause) || !Array.isArray(pause.held)) return pause;
+  const before: unknown[] = pause.held;
+  const held = before.map((message) => isRecord(message) ? labelledOrigin(message) : message);
+  return held.some((message, index) => message !== before[index]) ? { ...pause, held } : pause;
+}
+
+/**
+ * Fields a thread can do without, each checked on its own: one this build cannot read is dropped
+ * rather than costing the thread its conversation.
+ */
+const DROPPABLE_FIELDS: Readonly<Record<string, (value: unknown) => boolean>> = {
+  resourceStop: isResourceStop,
+  brief: isThreadBrief,
+  threadModel: isThreadModelChoice,
+  memory: isCoordinatorMemory,
+  report: isCoordinationReport,
+  resolvedAt: finiteNumber,
+  pullRequest: isPullRequestLink,
+  muted: (value) => value === true,
+  runOpen: (value) => value === true,
+  usage: isThreadUsage,
+  remoteLead: isHeldLead,
+  remoteHeard: isRemoteHeard,
+  remoteWorking: isRemoteWorking,
+  remoteStops: isRemoteStops,
+  caughtStarts: isCaughtStarts,
+};
+
+/** Lists a thread can do without, each item checked on its own: one this build cannot read is dropped and the rest kept. */
+const DROPPABLE_ITEMS: Readonly<Record<string, (value: unknown) => boolean>> = {
+  proposals: isThreadProposal,
+};
+
+/** Whether every field and list item a thread can do without is one this build reads, which the tables alone say. */
+function droppableFieldsReadable(value: Record<string, unknown>): boolean {
+  return Object.entries(DROPPABLE_FIELDS).every(([field, readable]) => value[field] === undefined || readable(value[field]))
+    && Object.entries(DROPPABLE_ITEMS).every(([field, readable]) => {
+      const items = value[field];
+      return items === undefined || Array.isArray(items) && items.every(readable);
+    });
+}
+
+const NOTHING_KEPT: ReadonlySet<string> = new Set();
+
+function withoutUnreadableFields(value: unknown, asSent: ReadonlySet<string> = NOTHING_KEPT) {
+  if (!isRecord(value)) return value;
+  let task = value;
+  for (const [field, readable] of Object.entries(DROPPABLE_FIELDS)) {
+    if (asSent.has(field) || task[field] === undefined || readable(task[field])) continue;
+    const { [field]: _unreadable, ...rest } = task;
+    task = rest;
+  }
+  for (const [field, readable] of Object.entries(DROPPABLE_ITEMS)) {
+    const items = task[field];
+    if (asSent.has(field) || items === undefined || Array.isArray(items) && items.every(readable)) continue;
+    const { [field]: _unreadable, ...rest } = task;
+    const kept = Array.isArray(items) ? items.filter(readable) : [];
+    task = kept.length ? { ...rest, [field]: kept } : rest;
+  }
+  return task;
+}
+
+/**
+ * A thread another computer's build sent, read honestly: what that build knows and this one does not
+ * is kept as it was sent, for the window to show as it is and leave alone, never swapped for a value
+ * of this build's own. A model the catalogue has renamed is read under its new name, as storage reads
+ * it; a field or list item whose shape this build cannot read at all is left out, a suggestion only
+ * for its shape and not for naming an engine or model this build does not know; and a role or verdict this build
+ * has no mark for is left out. The thread itself while it holds nothing to leave out.
+ */
+export function readableRemoteThread(thread: Thread): Thread {
+  let read = withoutUnreadableFields(renamedFields(thread), SHOWN_AS_SENT) as Thread;
+  const without = (field: "threadModel" | "proposals" | "role" | "outcome") => {
+    const { [field]: _unreadable, ...kept } = read;
+    read = kept as Thread;
+  };
+  if (read.threadModel !== undefined && !(isRecord(read.threadModel) && typeof read.threadModel.model === "string")) without("threadModel");
+  if (read.proposals !== undefined) {
+    const shown = Array.isArray(read.proposals) ? read.proposals.filter((proposal) => isRecord(proposal) && (proposal.engine === undefined || typeof proposal.engine === "string") && isThreadProposal({ ...proposal, engine: undefined, model: undefined, effort: undefined })) : [];
+    if (!shown.length) without("proposals");
+    else if (shown.length !== read.proposals.length) read = { ...read, proposals: shown };
+  }
+  if (read.role !== undefined && !isThreadRole(read.role)) without("role");
+  if (read.outcome !== undefined && !isThreadOutcome(read.outcome)) without("outcome");
+  if (!read.rankedAt) read = { ...read, rankedAt: threadLastOutputAt(read) };
+  return read;
+}
+
+/** What a thread from another build keeps as sent where storage would drop it, for naming a model this build does not know. */
+const SHOWN_AS_SENT: ReadonlySet<string> = new Set(["threadModel", "proposals"]);
+
+/** A conversation loaded separately uses the same migrations and validation as a complete store. */
+export function parseStoredConversationMessages(values: unknown[]): ConversationMessage[] {
+  return values.map((value, index) => {
+    const message = renamedMessageFields(value);
+    if (!isConversationMessage(message)) throw new Error(`Stored message ${index + 1} is unreadable.`);
+    return message;
+  });
+}
+
+function recordedEngine(value: unknown) {
+  if (!isRecord(value) || value.engine !== undefined) return value;
+  return { ...value, engine: UNRECORDED_ENGINE };
+}
+
+/** Null for a thread this build cannot read, which the caller counts and leaves out. */
+function sanitizeV2Thread(raw: unknown, lifted: Worktree[]): StoredThread | null {
+  const retired = withoutUnreadableFields(renamedFields(dropRetiredSettings(recordedEngine(raw))));
+  const value = isRecord(retired) ? liftEmbeddedWorktree(retired, lifted) : retired;
+  if (!isThreadBase(value)) return null;
+
+  const continuation = value.continuation;
+  if (continuation !== undefined && !isContinuation(continuation)) {
+    const { continuation: _discarded, ...withoutContinuation } = value;
+    return settleStoredSubagents({ ...withoutContinuation, continuationStatus: "invalid" });
+  }
+  if (continuation && value.continuationStatus !== "available") return null;
+  if (!continuation && value.continuationStatus !== "none" && value.continuationStatus !== "invalid") return null;
+  return settleStoredSubagents(value);
+}
+
+/** No provider session survives an app restart, so work saved mid-turn cannot still be working. */
+function settleStoredSubagents(task: StoredThread): StoredThread {
+  if (!task.subagents?.some((subagent) => subagent.status === "working")) return task;
+  return {
+    ...task,
+    subagents: task.subagents.map((subagent) => subagent.status === "working"
+      ? { ...subagent, status: "stopped" as const, finishedAt: subagent.finishedAt ?? task.updatedAt }
+      : subagent),
+  };
+}
+
+function isConversationMessage(value: unknown): value is ConversationMessage {
+  return isRecord(value) &&
+    nonEmptyString(value.id) &&
+    typeof value.kind === "string" && isMessageKind(value.kind) &&
+    typeof value.text === "string" &&
+    (value.artifact === undefined || value.artifact === true) &&
+    (value.answer === undefined || value.answer === true) &&
+    (value.origin === undefined || value.kind === "user" && isMessageOrigin(value.origin)) &&
+    (value.detail === undefined || typeof value.detail === "string") &&
+    (value.tone === undefined || value.tone === "error") &&
+    (value.attachments === undefined || (Array.isArray(value.attachments) && value.attachments.every(nonEmptyString))) &&
+    (value.annotations === undefined || (Array.isArray(value.annotations) && value.annotations.every(isAnnotation))) &&
+    (value.pastes === undefined || (Array.isArray(value.pastes) && value.pastes.every(isPastedText))) &&
+    (value.files === undefined || (Array.isArray(value.files) && value.files.every(isAttachedFile))) &&
+    (value.withdrawn === undefined || value.withdrawn === true) &&
+    finiteNumber(value.at);
+}
+
+function isHeldMessage(value: unknown): boolean {
+  return isRecord(value) &&
+    nonEmptyString(value.id) &&
+    typeof value.text === "string" &&
+    typeof value.prompt === "string" &&
+    Array.isArray(value.attachments) && value.attachments.every(nonEmptyString) &&
+    (value.annotations === undefined || (Array.isArray(value.annotations) && value.annotations.every(isAnnotation))) &&
+    (value.pastes === undefined || (Array.isArray(value.pastes) && value.pastes.every(isPastedText))) &&
+    (value.files === undefined || (Array.isArray(value.files) && value.files.every(isAttachedFile))) &&
+    (value.origin === undefined || isMessageOrigin(value.origin)) &&
+    (value.detail === undefined || typeof value.detail === "string") &&
+    (value.answers === undefined || nonEmptyString(value.answers)) &&
+    (value.usersOwn === undefined || value.usersOwn === true);
+}
+
+function isMessageOrigin(value: unknown): value is MessageOrigin {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "thread": return typeof value.title === "string" && (value.threadId === undefined || nonEmptyString(value.threadId)) && (value.computer === undefined || nonEmptyString(value.computer));
+    case "automation": return finiteNumber(value.runNumber);
+    case "coordination": return true;
+    case "legacy": return typeof value.label === "string";
+    default: return false;
+  }
+}
+
+function isAnnotation(value: unknown): value is Annotation {
+  return isRecord(value) && nonEmptyString(value.id) && nonEmptyString(value.quote) && typeof value.note === "string";
+}
+
+function isPastedText(value: unknown): value is PastedText {
+  return isRecord(value) && nonEmptyString(value.id) && typeof value.text === "string";
+}
+
+function isAttachedFile(value: unknown): value is AttachedFile {
+  return isRecord(value) && nonEmptyString(value.id) && nonEmptyString(value.path) && nonEmptyString(value.name)
+    && (value.folder === undefined || value.folder === true);
+}
+
+function isContinuation(value: unknown): value is Continuation {
+  return isRecord(value) && nonEmptyString(value.provider) && nonEmptyString(value.value);
+}
+
+function isContextUsage(value: unknown): value is ContextUsage {
+  return isRecord(value) && finiteNumber(value.tokens) && value.tokens >= 0 && finiteNumber(value.limit) && value.limit > 0 && nonEmptyString(value.model);
+}
+
+function isSubagent(value: unknown): value is Subagent {
+  return isRecord(value) &&
+    nonEmptyString(value.id) &&
+    typeof value.description === "string" &&
+    (value.agentType === undefined || typeof value.agentType === "string") &&
+    (value.sessionScoped === undefined || value.sessionScoped === true) &&
+    (value.status === "working" || value.status === "idle" || value.status === "completed" || value.status === "failed" || value.status === "stopped") &&
+    (value.lastToolName === undefined || typeof value.lastToolName === "string") &&
+    (value.summary === undefined || typeof value.summary === "string") &&
+    (value.totalTokens === undefined || finiteNumber(value.totalTokens) && value.totalTokens >= 0) &&
+    finiteNumber(value.startedAt) &&
+    (value.finishedAt === undefined || finiteNumber(value.finishedAt)) &&
+    Array.isArray(value.activity) &&
+    value.activity.every((item) => isRecord(item) && nonEmptyString(item.id) && (item.kind === "text" || item.kind === "tool") && (item.title === undefined || typeof item.title === "string") && typeof item.text === "string" && finiteNumber(item.at));
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/** Storage written before checkouts had records of their own carries no worktrees value at all. */
+function isEmpty(raw: StorageValues) {
+  return raw.tasks === null && raw.projects === null && (raw.worktrees ?? null) === null && raw.lastFolder === null;
+}

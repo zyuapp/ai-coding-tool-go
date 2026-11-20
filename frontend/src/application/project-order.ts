@@ -1,0 +1,41 @@
+import type { Project } from "../domain/project.js";
+
+/**
+ * Sidebar order. `sortIndex` wins so folders never move on their own; projects stored before
+ * sortIndex existed keep the order they were stored in until {@link backfillProjectSortIndex}
+ * pins them down.
+ */
+export function orderProjects(projects: Project[]): Project[] {
+  return [...projects].sort((left, right) => {
+    if (left.sortIndex !== undefined && right.sortIndex !== undefined) return left.sortIndex - right.sortIndex;
+    if (left.sortIndex !== undefined) return -1;
+    if (right.sortIndex !== undefined) return 1;
+    return 0;
+  });
+}
+
+/** Freezes the order projects loaded in, so a first launch after upgrading keeps the list the user last saw. */
+export function backfillProjectSortIndex(projects: Project[]): Project[] {
+  if (projects.every((project) => project.sortIndex !== undefined)) return projects;
+  const positions = new Map(orderProjects(projects).map((project, index) => [project.id, index]));
+  return projects.map((project) => project.sortIndex === undefined ? { ...project, sortIndex: positions.get(project.id)! } : project);
+}
+
+export function nextProjectSortIndex(projects: Project[]): number {
+  let lowest = 0;
+  for (const project of projects) lowest = Math.min(lowest, project.sortIndex ?? 0);
+  return lowest - 1;
+}
+
+/** Names a folder in the sidebar. An empty name takes the last one off, so it goes by its folder again. */
+export function nameProject(projects: Project[], projectId: string, name: string | null | undefined): Project[] {
+  if (name === undefined) return projects;
+  const wanted = name?.trim() || undefined;
+  const project = projects.find((item) => item.id === projectId);
+  if (!project || project.name === wanted) return projects;
+  return projects.map((item) => {
+    if (item.id !== projectId) return item;
+    const { name: _previous, ...rest } = item;
+    return wanted ? { ...rest, name: wanted } : rest;
+  });
+}

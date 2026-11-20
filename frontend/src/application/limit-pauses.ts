@@ -1,0 +1,152 @@
+/** Threads waiting out their account's usage limit, and the line they resume in once it lifts. */
+import { drained, queuedFor, resolveWorkspaceEffect } from "./workspace-reducer/run-queue.js";
+import { pendingIn, queuedIn, runsOf } from "./workspace-reducer/run-edits.js";
+import { now, settled } from "./workspace-reducer/shared.js";
+import { andThen, applied, type Step } from "./workspace-reducer/slice.js";
+import { threadsOf, unpausedIn } from "./workspace-reducer/thread-edits.js";
+import type { WorkspaceInput, WorkspaceTransition } from "./workspace-reducer/types.js";
+import { settleTurn, turnEnded, turnSettled } from "./run-settlement.js";
+import { threadBusy } from "./run-record.js";
+import { leavingThreadIds, projectFor, worktreeFor } from "./thread-location.js";
+import type { PendingRun, QueuedMessage, WorkspaceState } from "./workspace-state.js";
+import type { AgentEngine } from "../domain/agent-engine.js";
+import type { Thread } from "../domain/thread.js";
+import { limitLines, resumePrompt, resumesOnItsOwn, type HeldMessage } from "../domain/usage-limit.js";
+
+/**
+ * Whether a message to this thread waits with it. One that resumes on its own waits for its turn in
+ * line even after the limit lifts; a weekly one is taken up by the user's own send once it has.
+ */
+export function heldByLimit(state: WorkspaceState, taskId: string, at: number) {
+  const pause = state.threads.find((thread) => thread.id === taskId)?.limitPause;
+  return Boolean(pause && (resumesOnItsOwn(pause) || at < pause.resetsAt));
+}
+
+/**
+ * Takes a thread out of line and starts it: with the first message written to it while it waited,
+ * or with a prompt to carry on. Either run warms up before the next thread in line goes.
+ */
+export function resumeThread(state: WorkspaceState, taskId: string): WorkspaceTransition {
+  return applied(state, resumed(state, taskId));
+}
+
+/** {@link resumeThread}, as the edits it makes. */
+export function resumed(state: WorkspaceState, taskId: string): Step {
+  const thread = state.threads.find((item) => item.id === taskId);
+  const pause = thread?.limitPause;
+  if (!thread || !pause || threadBusy(state, taskId)) return {};
+  const lifted = unpausedIn(threadsOf(state), taskId);
+  const [written, ...rest] = queuedFor(state, taskId);
+  if (written) {
+    const first = { edits: [lifted, queuedIn(runsOf(state), taskId, [{ ...written, prompt: resumePrompt(pause, written.prompt) }, ...rest])] };
+    return andThen(state, first, (next) => drained(next, taskId, "resume"));
+  }
+  const project = projectFor(state, thread);
+  const pending: PendingRun = {
+    id: crypto.randomUUID(),
+    runId: crypto.randomUUID(),
+    origin: "composer",
+    operation: { type: "resume", after: "limit" },
+    taskId,
+    ...(project ? { projectId: project.id } : {}),
+    text: "",
+    prompt: resumePrompt(pause),
+    attachments: [],
+    warming: true,
+  };
+  return { edits: [lifted, pendingIn(runsOf(state), pending)], effects: [resolveWorkspaceEffect(pending.id, thread, project, worktreeFor(state, thread), false)] };
+}
+
+/**
+ * Takes a thread out of line, handing anything written to it while it waited back to the composer.
+ * One that would have carried on by itself has its turn end here instead, as a run the user stops
+ * does: it reads as stopped, and its coordinator hears so in the same words.
+ */
+export function pauseCancelled(state: WorkspaceState, taskId: string): Step {
+  const thread = state.threads.find((item) => item.id === taskId);
+  if (!thread?.limitPause) return {};
+  const lifted = { edits: [unpausedIn(threadsOf(state), taskId)] };
+  if (!resumesOnItsOwn(thread.limitPause)) return andThen(state, lifted, (next) => drained(next, taskId, "hand-back"));
+  return andThen(state, lifted, (next) => andThen(next, turnEnded(next, taskId, "cancelled"), (ended) => turnSettled(ended, taskId, settleTurn({ status: "cancelled", stop: "user" }), undefined, now())));
+}
+
+/** An engine's line moves one thread at a time: the next waits until the one before has answered once. */
+function warming(state: WorkspaceState, engine: AgentEngine) {
+  const engineOf = (taskId: string | undefined) => state.threads.find((thread) => thread.id === taskId)?.engine;
+  return Object.values(state.activeRuns).some((run) => run.warming && engineOf(run.taskId) === engine)
+    || Object.values(state.pendingRuns).some((pending) => pending.warming && engineOf(pending.taskId) === engine);
+}
+
+/** Starts the first thread in each engine's line whose limit has lifted, unless one is still warming up. */
+function advanceLines(state: WorkspaceState, at: number): WorkspaceTransition {
+  let transition = settled(state);
+  const leaving = leavingThreadIds(state);
+  for (const [engine, line] of limitLines(state.threads)) {
+    if (warming(transition.state, engine)) continue;
+    const next = line.find((thread) => thread.limitPause!.resetsAt <= at && !leaving.has(thread.id) && !transition.state.creatingWorktrees.includes(thread.id));
+    if (!next) continue;
+    const resumed = resumeThread(transition.state, next.id);
+    transition = { ...resumed, effects: [...transition.effects, ...resumed.effects] };
+  }
+  return transition;
+}
+
+/** The next moment a thread in line has its limit lift; ones already due wait on the thread warming up. */
+function nextReset(state: WorkspaceState, after: number): number | null {
+  let next: number | null = null;
+  for (const line of limitLines(state.threads).values()) {
+    for (const thread of line) if (thread.limitPause!.resetsAt > after) next = Math.min(next ?? Infinity, thread.limitPause!.resetsAt);
+  }
+  return next;
+}
+
+/** Inputs after which a thread in line may be free to go: time passing, or a run warming up or ending. */
+function mayAdvance(input: WorkspaceInput) {
+  if (input.type === "run.event") return input.event.type === "context.usage" || input.event.type === "run.status";
+  return input.type === "limits.elapsed" || input.type === "store.loaded" || input.type === "store.absent" || input.type === "task.send"
+    || input.type === "run.unresolved" || input.type === "limit.cancel" || input.type === "view.set-focused" && input.focused;
+}
+
+/** A restart hands each paused thread back what was written to it while it waited. */
+function restoreHeld(state: WorkspaceState): WorkspaceState {
+  let queuedMessages = state.queuedMessages;
+  for (const thread of state.threads) {
+    const held = thread.limitPause?.held;
+    if (held?.length && !queuedMessages[thread.id]?.length) queuedMessages = { ...queuedMessages, [thread.id]: held };
+  }
+  return queuedMessages === state.queuedMessages ? state : { ...state, queuedMessages };
+}
+
+function sameMessages(queued: readonly QueuedMessage[], held: readonly HeldMessage[]) {
+  return queued.length === held.length && queued.every((message, index) => message.id === held[index]!.id);
+}
+
+/** Writes down what each paused thread holds, so the store keeps it with the pause. */
+function recordHeld(state: WorkspaceState): WorkspaceState {
+  const stale = (thread: Thread) => Boolean(thread.limitPause) && !sameMessages(state.queuedMessages[thread.id] ?? [], thread.limitPause!.held ?? []);
+  if (!state.threads.some(stale)) return state;
+  return {
+    ...state,
+    threads: state.threads.map((thread) => {
+      if (!stale(thread)) return thread;
+      const { held: _recorded, ...pause } = thread.limitPause!;
+      const queued = state.queuedMessages[thread.id] ?? [];
+      return { ...thread, limitPause: queued.length ? { ...pause, held: queued.map(({ steering: _steering, ...message }) => message) } : pause };
+    }),
+  };
+}
+
+/** Deadlines are durable; resuming threads and the one timer watching for the next reset belong to the reducer. */
+export function reconcileLimitPauses(previous: WorkspaceState, transition: WorkspaceTransition, input: WorkspaceInput): WorkspaceTransition {
+  const check = mayAdvance(input);
+  if (!check && previous.threads === transition.state.threads && previous.queuedMessages === transition.state.queuedMessages) return transition;
+  const at = input.type === "limits.elapsed" ? input.at : Date.now();
+  const loaded = input.type === "store.loaded" ? restoreHeld(transition.state) : transition.state;
+  const advanced = check ? advanceLines(loaded, at) : settled(loaded);
+  const state = recordHeld(advanced.state);
+  const before = nextReset(previous, at);
+  const next = nextReset(state, at);
+  const effects = [...transition.effects, ...advanced.effects];
+  if (next === before && !(check && next !== null)) return { ...transition, state, effects };
+  return { ...transition, state, effects: [...effects, { type: "schedule-limit-reset", at: next }] };
+}

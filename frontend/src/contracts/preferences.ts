@@ -1,0 +1,61 @@
+import type { EngineModel } from "../domain/agent-engine.js";
+import type { BrowserImportMemory } from "../domain/browser-import.js";
+import type { ShortcutOverrides } from "../domain/shortcuts.js";
+import type { ThemeMode } from "../domain/theme.js";
+import type { SidebarSections } from "../domain/sidebar.js";
+import type { SubagentGroups } from "../domain/run.js";
+
+/** Presentation choices the window remembers between launches. */
+export type ViewPreferences = {
+  favoriteModels?: EngineModel[];
+  /** The theme the window paints in, by id. Themes the app no longer ships fall back to the default. */
+  theme: string;
+  /** The ground the user asked for, which "auto" leaves to the system's own appearance. */
+  themeMode: ThemeMode;
+  /** The family the window's chrome and prose are set in, by id or as an installed family's name. */
+  uiFont: string;
+  /** The family code, diffs, and the terminal are set in, by id or as an installed family's name. */
+  monoFont: string;
+  /** How big a conversation reads, and how big the terminal draws, in px. Chrome follows neither. */
+  readingSize: number;
+  terminalSize: number;
+  sessionPanelOpen: boolean;
+  sidebarOpen: boolean;
+  /** Whether grabbing a window plays the shutter, which is the only feedback that lands as it happens. */
+  captureSound: boolean;
+  /** Whether grabbing a window brings AI Coding Tool forward, so the caption can be typed where the shot landed. */
+  captureFocus: boolean;
+  /** The one project the activity lists are narrowed to. Every project when absent. */
+  activityProject?: string;
+  /** The simulator last picked or opened, which a Simulator panel shows when its dock has none. */
+  simulatorDevice?: string;
+  /** Which of the sidebar's lists are unfolded. */
+  sections: SidebarSections;
+  /** Which subagent groups are unfolded: the sidebar's list, and each status heading in the panel. */
+  subagentGroups: SubagentGroups;
+  /** Whether a run reaches the user's own Chrome through the Claude in Chrome extension. */
+  chromeBrowser: boolean;
+  /** Whether a run may see and operate other applications. On when absent. */
+  computerUse: boolean;
+  /** Whether a run may drive the browser panel. The user's own tabs stay usable either way. */
+  browserTools: boolean;
+  /** Whether excessive engine memory stops its owning thread. On when absent. */
+  memoryProtection?: boolean;
+  /** Whether a thread that needs the user reaches the desktop while the window is behind something else. */
+  notifications: boolean;
+  /** Only the bindings that differ from the defaults; an action bound to nothing is stored as null. */
+  shortcuts?: ShortcutOverrides;
+  /** The pages each thread's dock reopens, keyed by thread id, and the origins a run may reach without asking again. */
+  browserTabs?: Record<string, string[]>;
+  browserOrigins?: string[];
+  /** The import "Import again" repeats. */
+  browserImport?: BrowserImportMemory;
+  /** What the user closed toasts about, such as an engine release they chose not to install. */
+  dismissedToasts?: string[];
+  /** Usage warnings the user put away, by `usageWarningKey`. */
+  dismissedUsageWarnings?: string[];
+  /** The projects last picked to start a thread in, newest first. */
+  recentProjects?: string[];
+  /** Coordinators cleared from the archive whose threads on paired computers may still work under them. */
+  discardedLeads?: string[];
+};

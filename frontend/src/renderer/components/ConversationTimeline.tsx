@@ -1,0 +1,316 @@
+import { elementScroll, useVirtualizer } from "@tanstack/react-virtual";
+import type { IconType } from "react-icons";
+import { LuChevronDown as ChevronDown, LuFolderSymlink as FolderSymlink, LuHourglass as Hourglass } from "react-icons/lu";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import type { ThreadStart } from "../../application/coordination-view";
+import type { StreamingTail } from "../../application/thread-run-state";
+import type { ReadingPoint, ThreadWait } from "../../application/workspace-state";
+import type { AnnotationReveal } from "../../application/workspace-view";
+import type { FindView } from "../../application/workspace-find";
+import type { AgentEngine } from "../../domain/agent-engine";
+import { isCoordinator } from "../../domain/coordination";
+import type { RetryNotice } from "../../domain/run";
+import { liftTime, resumesOnItsOwn, type LimitPause } from "../../domain/usage-limit";
+import { CommandButton } from "./CommandControl";
+import { IconButton } from "../ui/Button";
+import { Notice } from "../ui/Notice";
+import type { Annotation, AnnotationAnchor } from "../../domain/conversation";
+import type { Thread } from "../../domain/thread";
+import { groupTimeline, messageRows } from "../timeline/grouping";
+import { MAX_FIND_HITS, targetKey } from "../../domain/find";
+import { drawnMatches, paintMatches } from "../find/paint";
+import { useAnnotationMarkers, useAnnotationReveal, useAnnotationSelection, useSelectionCapture } from "../timeline/use-annotations";
+import { useReadingView } from "../timeline/use-reading-view";
+import { AnnotatePopover, AnnotationMarkers, NoteEditor } from "./AnnotateLayer";
+import { TimelineEmptyState } from "./TimelineEmptyState";
+import { TimelineRow } from "./TimelineRow";
+import { Elapsed, RevealedMessage } from "./TurnWork";
+import { ThreadCardsContext, type ThreadCardsView } from "./Coordination";
+import { MessageArtifactScope, useMessageLinks } from "./MarkdownMessage";
+import { SweepBand } from "./SweepBand";
+
+export { groupTimeline } from "../timeline/grouping";
+export { formatElapsed } from "./TurnWork";
+export { READING_SETTLE_MS } from "../timeline/use-reading-view";
+
+const EMPTY_ANNOTATIONS: Annotation[] = [];
+const NO_STARTS: readonly ThreadStart[] = [];
+
+export type ConversationTimelineProps = {
+  currentThread?: Thread;
+  engine: AgentEngine;
+  /** What the engine running this thread is called. */
+  engineLabel: string;
+  folder: string;
+  /** The checkout the thread works in, where the commits its replies name are looked up. */
+  workspaceId?: string;
+  status: "idle" | "running" | "stopped";
+  compacting: boolean;
+  /** The request the engine is retrying, while it is. */
+  retrying?: RetryNotice | null;
+  /** The usage limit the thread is waiting out, and its place in line. */
+  limitPause?: (LimitPause & { position: number | null }) | null;
+  /** What the thread is waiting on before a run of its own can start, which can take minutes. */
+  waitingOn?: ThreadWait | null;
+  /** Whether the run is held on an approval only the user can give. */
+  blocked?: boolean;
+  streamingTail?: StreamingTail | null;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
+  /** Where this thread was left reading, as the workspace holds it. Opening the thread puts it back. */
+  readingPoint?: ReadingPoint;
+  /** Reports where this thread's reader has settled, which the workspace keeps for the return trip. */
+  onReadingPointMove?: (point: ReadingPoint) => void;
+  empty?: { icon: IconType; title: string; description: string };
+  /** False while the stored threads are still on their way, when an empty transcript means nothing. */
+  restored?: boolean;
+  /** The find bar, when it is this transcript being searched, and the match it is showing. */
+  find?: FindView | null;
+  /** This composer's drafted annotations, whose anchors are highlighted and numbered here. */
+  annotations?: Annotation[];
+  /** The workspace's latest ask for this transcript to show one of those annotations. */
+  annotationReveal?: AnnotationReveal | null;
+  /** Offered on selected assistant text: annotate into this transcript's composer. */
+  onAnnotateAdd?: (draft: { quote: string; note: string; anchor: AnnotationAnchor }) => void;
+  onAnnotateNote?: (annotationId: string, note: string) => void;
+  onAnnotateRemove?: (annotationId: string) => void;
+  /** Offered next to it when this transcript can hand a selection to a side chat as a bare reference. */
+  onAnnotateSide?: (quote: string) => void;
+  /** On a coordinator's own transcript: the threads it started, drawn as cards where each began. */
+  threadCards?: ThreadCardsView | null;
+  starts?: readonly ThreadStart[];
+};
+
+/** What each wait is called, in the thread the wait is happening in. */
+const WAIT_LABELS: Record<ThreadWait, string> = {
+  worktree: "Creating worktree…",
+  "worktree-release": "Removing worktree…",
+  run: "Starting…",
+};
+
+function limitLabel(pause: LimitPause & { position: number | null }, now: number) {
+  if (!resumesOnItsOwn(pause)) return now < pause.resetsAt ? `Weekly usage limit reached. Resets ${liftTime(pause.resetsAt, now)}.` : "Weekly usage limit reset.";
+  const behind = pause.position !== null && pause.position > 1 ? ` after ${pause.position - 1} other ${pause.position === 2 ? "thread" : "threads"}` : "";
+  return now < pause.resetsAt ? `Usage limit reached. Resumes at ${liftTime(pause.resetsAt, now)}${behind}.` : `Usage limit reset. Resuming${behind}.`;
+}
+
+function retryLabel(retry: RetryNotice) {
+  const count = retry.attempt === undefined ? "" : retry.maxRetries === undefined ? ` ${retry.attempt}` : ` ${retry.attempt} of ${retry.maxRetries}`;
+  return `${retry.message} Retrying${count}…`;
+}
+
+/**
+ * `since` is when the live turn's first step began; until it has one, the row counts from when it appeared.
+ * A run held on an approval is not working, so it says whom it waits for and counts nothing.
+ */
+function ThinkingRow({ since, blocked }: { since: number | undefined; blocked: boolean }) {
+  const [shownAt] = useState(Date.now);
+  if (blocked) return <div className="run-status thinking-row" role="status"><i className="run-bead held" aria-hidden="true" /><span>Waiting for your approval</span></div>;
+  return (
+    <div className="run-status thinking-row" role="status">
+      <i className="run-bead" aria-hidden="true" />
+      <span className="text-sweep">Working<SweepBand>Working</SweepBand></span>
+      <span className="thinking-elapsed" aria-hidden="true"><Elapsed startedAt={Math.min(since ?? shownAt, shownAt)} endsAt={null} /></span>
+    </div>
+  );
+}
+
+/** A wait counts from when this row appeared, so a long one shows it is still moving. */
+function WaitingRow({ wait }: { wait: ThreadWait }) {
+  const [shownAt] = useState(Date.now);
+  return (
+    <div className="run-status waiting-row" role="status" aria-live="polite">
+      <FolderSymlink size={14} strokeWidth={1.8} aria-hidden="true" />
+      <span className="text-sweep">{WAIT_LABELS[wait]}<SweepBand>{WAIT_LABELS[wait]}</SweepBand></span>
+      <span className="thinking-elapsed" aria-hidden="true"><Elapsed startedAt={shownAt} endsAt={null} /></span>
+    </div>
+  );
+}
+
+/** How often a usage limit's sentence is read again, so its time and line hold true while it waits. */
+const LIMIT_TICK_MS = 30_000;
+
+function LimitRow({ pause, taskId }: { pause: LimitPause & { position: number | null }; taskId: string }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), LIMIT_TICK_MS);
+    return () => clearInterval(timer);
+  }, [pause.resetsAt]);
+  const action = resumesOnItsOwn(pause)
+    ? <CommandButton variant="secondary" pill command={{ type: "limit.cancel", taskId }}>Cancel auto-resume</CommandButton>
+    : <CommandButton variant="secondary" pill command={{ type: "limit.resume", taskId }}>Resume</CommandButton>;
+  return (
+    <Notice tone="warning" className="limit-row" icon={<Hourglass size={16} strokeWidth={1.8} />} actions={action}>
+      {limitLabel(pause, now)}
+    </Notice>
+  );
+}
+
+/** The newest message the user sent themselves, rather than one another thread or a schedule sent for them. */
+function newestPrompt(messages: Thread["messages"]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.kind === "user" && !message.origin) return message.id;
+  }
+  return undefined;
+}
+
+export function ConversationTimeline({ currentThread, engine, engineLabel, folder, workspaceId, status, compacting, retrying = null, limitPause = null, waitingOn = null, blocked = false, streamingTail, scrollContainerRef, readingPoint, onReadingPointMove, empty, restored = true, find, annotations = EMPTY_ANNOTATIONS, annotationReveal = null, onAnnotateAdd, onAnnotateNote, onAnnotateRemove, onAnnotateSide, threadCards = null, starts = NO_STARTS }: ConversationTimelineProps) {
+  const messages = currentThread?.messages ?? [];
+  const artifactScope = useMemo(() => ({ root: folder, taskId: currentThread?.id, workspaceId }), [folder, currentThread?.id, workspaceId]);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const links = useMessageLinks();
+  const viewAttachment = useCallback((source: string, gallery: string[]) => links.openImage?.(source, gallery), [links.openImage]);
+  const annotate = useAnnotationSelection({ onAnnotateAdd, onAnnotateNote, onAnnotateRemove, onAnnotateSide });
+  const lastMessage = messages.at(-1);
+  /** The answer being read out, whether it is still streaming or has already finished. */
+  const answerId = streamingTail?.messageId ?? (lastMessage?.kind === "assistant" ? lastMessage.id : undefined);
+  const toolId = lastMessage?.kind === "tool" ? lastMessage.id : undefined;
+  const promptId = useMemo(() => newestPrompt(messages), [messages]);
+  /** The gap above the timeline, which puts the virtualizer's offsets in the scroller's own terms. */
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const coordinator = isCoordinator(currentThread);
+  /** Only a coordinator's transcript, with its cards to draw, places the threads it started. */
+  const placed = coordinator && threadCards ? starts : NO_STARTS;
+  const groups = useMemo(
+    () => groupTimeline(messages, { running: status === "running", tailMessageId: streamingTail?.messageId, runEndedAt: currentThread?.runEndedAt, coordinator, starts: placed }),
+    [messages, status, streamingTail?.messageId, currentThread?.runEndedAt, coordinator, placed],
+  );
+  /** Every scroll the virtualizer makes for itself passes through here, which is how the reading view knows it is not the reader's. */
+  const virtualizerScrolledAt = useRef(-Infinity);
+  const virtualizer = useVirtualizer({
+    count: groups.length,
+    getScrollElement: () => scrollContainerRef.current,
+    scrollToFn: (offset, options, instance) => {
+      virtualizerScrolledAt.current = performance.now();
+      elementScroll(offset, options, instance);
+    },
+    estimateSize: (index) => {
+      const group = groups[index];
+      if (group?.kind === "turn") return group.final ? 140 : 64;
+      if (group?.kind === "threads") return 120;
+      if (group?.kind === "updates" || (group?.kind === "message" && group.from)) return 40;
+      return group?.message.kind === "user" ? 88 : 64;
+    },
+    getItemKey: (index) => groups[index]?.id ?? index,
+    scrollMargin,
+    overscan: 6,
+  });
+  const rowOfMessage = useMemo(() => messageRows(groups), [groups]);
+  const newestGroup = groups.at(-1);
+  const liveSince = newestGroup?.kind === "turn" && newestGroup.live ? newestGroup.steps[0]?.at : undefined;
+  const hit = find?.hit ?? null;
+  const rendered = virtualizer.getVirtualItems().map((item) => item.key).join(",");
+
+  const painter = find ? targetKey(find.target) : "";
+
+  /** Only what a message says is lit, so a match is never painted onto the chrome around it. */
+  useEffect(() => {
+    const needle = find?.query.trim().toLowerCase() ?? "";
+    const found = drawnMatches(timelineRef.current, needle, "data-message-id", MAX_FIND_HITS);
+    const active = hit ? found.find((match) => match.owner === hit.messageId && match.occurrence === hit.occurrence) : undefined;
+    paintMatches(painter, found.map((match) => match.range), active?.range ?? null);
+  }, [painter, find?.query, hit?.messageId, hit?.occurrence, rendered]);
+
+  useEffect(() => () => paintMatches(painter, [], null), [painter]);
+
+  /** Whether the transcript itself is drawn, rather than its loading or empty state. */
+  const drawn = !currentThread?.historySummary && (messages.length > 0 || !!streamingTail);
+  const { atBottom, scrollToFoot } = useReadingView({
+    scrollContainerRef, timelineRef, drawn, virtualizer, virtualizerScrolledAt, threadId: currentThread?.id, rowOfMessage,
+    hit, answerId, toolId, promptId, readingPoint, onReadingPointMove, setScrollMargin,
+  });
+  useSelectionCapture({ timelineRef, scrollContainerRef, threadId: currentThread?.id, onAnnotateAdd, setSelection: annotate.setSelection, dismissNote: annotate.dismissNote });
+  const markers = useAnnotationMarkers({ timelineRef, annotations, rendered, messageCount: messages.length });
+  const scrollToMessage = useCallback((messageId: string) => {
+    const row = rowOfMessage.get(messageId);
+    if (row !== undefined) virtualizer.scrollToIndex(row, { align: "center" });
+  }, [rowOfMessage, virtualizer]);
+  const flashing = useAnnotationReveal({ reveal: annotationReveal, markers, timelineRef, scrollToMessage });
+
+  if (currentThread?.historySummary) return <div className="empty-state" role="status"><span className="text-sweep">Loading conversation…<SweepBand>Loading conversation…</SweepBand></span></div>;
+
+  if (!drawn) {
+    return <TimelineEmptyState restored={restored} engineLabel={engineLabel} {...(empty ? { empty } : {})} />;
+  }
+
+  return (
+    <RevealedMessage.Provider value={hit?.messageId ?? null}>
+    <MessageArtifactScope.Provider value={artifactScope}>
+    <ThreadCardsContext.Provider value={coordinator ? threadCards : null}>
+    <div className="timeline" ref={timelineRef}>
+      <div className="timeline-items" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const group = groups[item.index]!;
+          return (
+            <TimelineRow
+              key={item.key}
+              engine={engine}
+              group={group}
+              index={item.index}
+              offset={item.start - scrollMargin}
+              newest={item.index === groups.length - 1}
+              measure={virtualizer.measureElement}
+              /** Only the live turn reads the tail, so a settled row's props hold still while it streams. */
+              streamingTail={group.kind === "turn" && group.live ? streamingTail : null}
+              onViewAttachment={viewAttachment}
+            />
+          );
+        })}
+      </div>
+      <AnnotationMarkers markers={markers} annotations={annotations} noteReturn={annotate.noteReturn} onEdit={annotate.setNoting} flashing={flashing} />
+      {currentThread?.resourceStop && <Notice tone="warning" className="resource-stop-row" actions={<CommandButton variant="secondary" pill disabled={currentThread.resourceStop.cleanup !== "complete"} command={{ type: "resource.resume", taskId: currentThread.id }}>Resume</CommandButton>}>
+        <strong>Stopped due to high memory usage</strong>
+        <p>This thread and its background agents were stopped to keep the app responsive. Work already saved is preserved.</p>
+        <p>An interrupted action may have partially completed.</p>
+        <details><summary>Details</summary><p>Memory at stop: {(currentThread.resourceStop.bytes / 1024 ** 3).toFixed(1)} GB. {currentThread.resourceStop.cleanup === "stopping" ? "Stopping owned processes…" : currentThread.resourceStop.cleanup === "incomplete" ? "Some owned processes have not exited. Resume will be available once they stop." : "Owned processes have exited."}</p></details>
+      </Notice>}
+      {waitingOn && <WaitingRow key={waitingOn} wait={waitingOn} />}
+      {status !== "running" && limitPause && currentThread && <LimitRow pause={limitPause} taskId={currentThread.id} />}
+      {status === "running" && compacting && (
+        <div className="run-status compacting-row" role="status" aria-live="polite">
+          <i className="run-bead" aria-hidden="true" />
+          <span className="text-sweep">Compacting messages…<SweepBand>Compacting messages…</SweepBand></span>
+        </div>
+      )}
+      {status === "running" && !compacting && retrying && (
+        <div className="run-status retrying-row" role="status" aria-live="polite">
+          <i className="run-bead" aria-hidden="true" />
+          <span className="text-sweep">{retryLabel(retrying)}<SweepBand>{retryLabel(retrying)}</SweepBand></span>
+        </div>
+      )}
+      {status === "running" && !compacting && !retrying && (
+        <ThinkingRow since={liveSince} blocked={blocked} />
+      )}
+      {!atBottom && (
+        <div className="scroll-to-end-dock">
+          <IconButton variant="glass" size="lg" round className="scroll-to-end" label="Scroll to the latest message" tip="Latest message" onClick={scrollToFoot}>
+            <ChevronDown size={18} aria-hidden="true" />
+          </IconButton>
+        </div>
+      )}
+      {annotate.selection && !annotate.noting && onAnnotateAdd && (
+        <AnnotatePopover
+          selection={annotate.selection}
+          toolbarRef={annotate.selectionToolbar}
+          noteReturn={annotate.noteReturn}
+          onNote={annotate.openNote}
+          onSide={onAnnotateSide ? annotate.referToSide : undefined}
+        />
+      )}
+      {annotate.noting && (
+        <NoteEditor
+          noting={annotate.noting}
+          editorRef={annotate.noteEditor}
+          onChange={annotate.setNoting}
+          onCommit={annotate.commitNote}
+          onClose={annotate.closeNote}
+          onRemove={annotate.removeNote}
+        />
+      )}
+    </div>
+    </ThreadCardsContext.Provider>
+    </MessageArtifactScope.Provider>
+    </RevealedMessage.Provider>
+  );
+}

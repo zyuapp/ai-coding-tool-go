@@ -1,0 +1,181 @@
+/** One page the browser panel holds open. The reducer owns this record; the view itself lives in main. */
+export type BrowserTab = {
+  id: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
+};
+
+/** An element a snapshot offers to act on. `ref` is only valid until the next snapshot of that tab. */
+export type BrowserElement = {
+  ref: string;
+  role: string;
+  name: string;
+  /** What a field currently holds. Never set for a password field. */
+  value?: string;
+};
+
+export type BrowserSnapshot = {
+  tabId: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  text: string;
+  elements: BrowserElement[];
+};
+
+/**
+ * A picture of a tab, already written to disk. The caller opens the file to see it; nothing carries
+ * the image itself, so a picture costs the same to report however large the page is.
+ */
+export type BrowserShot = {
+  tabId: string;
+  url: string;
+  title: string;
+  /** The PNG file. It lives in a temporary folder the app removes when it closes. */
+  path: string;
+  width: number;
+  height: number;
+};
+
+export type BrowserConsoleLevel = "debug" | "info" | "warning" | "error";
+
+export type BrowserConsoleEntry = {
+  sequence: number;
+  at: number;
+  level: BrowserConsoleLevel;
+  message: string;
+  source?: string;
+  line?: number;
+};
+
+export type BrowserConsoleSnapshot = {
+  kind: "console";
+  tabId: string;
+  url: string;
+  title: string;
+  entries: BrowserConsoleEntry[];
+  latestSequence: number;
+  omitted: number;
+};
+
+export type BrowserNetworkEntry = {
+  sequence: number;
+  startedAt: number;
+  method: string;
+  url: string;
+  resourceType: string;
+  durationMs: number;
+  status?: number;
+  error?: string;
+  fromCache?: boolean;
+};
+
+export type BrowserNetworkSnapshot = {
+  kind: "network";
+  tabId: string;
+  url: string;
+  title: string;
+  entries: BrowserNetworkEntry[];
+  latestSequence: number;
+  omitted: number;
+};
+
+export type BrowserWaitCondition = "text" | "text-gone" | "element" | "element-gone" | "url" | "network-idle";
+
+export type BrowserWaitResult = {
+  kind: "wait";
+  tabId: string;
+  url: string;
+  title: string;
+  condition: BrowserWaitCondition;
+  value?: string;
+  matched: boolean;
+  elapsedMs: number;
+};
+
+/** Extra page state an agent may inspect without changing the page or workspace. */
+export type BrowserInspection =
+  | { op: "console"; since?: number; limit?: number; minimumLevel?: BrowserConsoleLevel }
+  | { op: "network"; since?: number; limit?: number; failuresOnly?: boolean }
+  | { op: "wait"; condition: BrowserWaitCondition; value?: string; timeoutMs: number };
+
+export type BrowserInspectionResult = BrowserConsoleSnapshot | BrowserNetworkSnapshot | BrowserWaitResult;
+
+/** What a caller does to the page. Every target is a `ref` from that tab's latest snapshot. */
+export type BrowserAction =
+  | { kind: "click"; ref: string }
+  | { kind: "type"; ref: string; text: string; submit?: boolean };
+
+export type BrowserBounds = { x: number; y: number; width: number; height: number };
+
+/** A navigation the user has to answer before a run may make it. */
+export type BrowserApproval = {
+  approvalId: string;
+  url: string;
+  taskId: string;
+  /** The tab it would load in, or a new one when absent. */
+  tabId?: string;
+};
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
+
+/**
+ * What the browser will load for what a caller typed, or null when that is nothing it can load.
+ * Only http and https ever come back, so no caller can reach the file system through the panel.
+ */
+export function browserUrl(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : `${LOCAL_HOSTS.has(trimmed.split(/[:/?#]/)[0] ?? "") ? "http" : "https"}://${trimmed}`;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (!url.hostname) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where the panel searches. Google sometimes answers an automated request with its unusual-traffic
+ * page rather than results, so a search made from here goes somewhere that answers it every time.
+ */
+export function browserSearchUrl(query: string): string {
+  return `https://duckduckgo.com/?q=${encodeURIComponent(query.trim())}`;
+}
+
+/** The origin an allowlist entry covers. Null for anything that is not a loadable page. */
+export function browserOrigin(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What a tab calls itself: the page's own title, else the site it is on, else that it is waiting. */
+export function browserTabTitle(tab: Pick<BrowserTab, "title" | "url">) {
+  if (tab.title) return tab.title;
+  try {
+    return new URL(tab.url).host || "New tab";
+  } catch {
+    return "New tab";
+  }
+}
+
+/** How a tab reads in a list, for a caller that has no screen. */
+export function describeTab(tab: BrowserTab) {
+  const parts = [`${tab.title || tab.url || "Blank tab"} [${tab.id}]`, tab.url, ...(tab.loading ? ["loading"] : []), ...(tab.error ? [tab.error] : [])];
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** The workspace grants origins globally and autonomous browsing per task. */
+export type BrowserPermissions = { origins: string[]; autonomousTaskIds: string[] };

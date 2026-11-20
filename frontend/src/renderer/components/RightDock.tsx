@@ -1,0 +1,154 @@
+import { useCallback, useRef, type ReactNode } from "react";
+import { LuGitFork as GitFork, LuGlobe as Globe, LuSquareTerminal as SquareTerminal } from "react-icons/lu";
+import { DockContent } from "./DockContent";
+import { DockTabStrip } from "./DockTabStrip";
+import { engineIcon } from "./ThreadEngineIcon";
+import { roleIcon } from "./ThreadRoleMark";
+import { ADD_TAB_MENU, type DockLauncher, type DockPanel, type DockTab } from "./dock-registry";
+import type { useTaskWorkspace } from "../task-workspace/useTaskWorkspace";
+import { useDismissibleLayer } from "../focus";
+import { browserTabTitle } from "../../domain/browser";
+import { hasUnreadAttention } from "../../domain/attention";
+import type { FindView } from "../../application/workspace-find";
+import { PartBoundary } from "./PartBoundary";
+
+type Workspace = ReturnType<typeof useTaskWorkspace>;
+
+const MIN_DOCK_WIDTH = 320;
+
+/** Tells the separator the width it now holds and the range it can move through. */
+function reportDockWidth(target: HTMLElement) {
+  const panel = target.parentElement;
+  const parent = panel?.parentElement;
+  if (!panel || !parent) return;
+  target.setAttribute("aria-valuemin", String(MIN_DOCK_WIDTH));
+  target.setAttribute("aria-valuemax", String(Math.round(parent.getBoundingClientRect().width - MIN_DOCK_WIDTH)));
+  const width = Math.round(panel.getBoundingClientRect().width);
+  target.setAttribute("aria-valuenow", String(width));
+  target.setAttribute("aria-valuetext", `${width} pixels wide`);
+}
+
+function resizeRightDock(target: HTMLElement, clientX: number) {
+  const panel = target.parentElement;
+  const parent = panel?.parentElement;
+  if (!panel || !parent) return;
+  const bounds = parent.getBoundingClientRect();
+  parent.style.setProperty("--right-dock-width", `${Math.min(bounds.width - MIN_DOCK_WIDTH, Math.max(MIN_DOCK_WIDTH, bounds.right - clientX))}px`);
+  reportDockWidth(target);
+}
+
+/** Back to the width the layout gives the dock on its own. */
+function resetRightDock(target: HTMLElement) {
+  target.parentElement?.parentElement?.style.removeProperty("--right-dock-width");
+  reportDockWidth(target);
+}
+
+/** The right dock: its tab strip, the view the selected tab draws, and the edge that resizes it. */
+export function RightDock({ workspace, panels, launchers, open, expanded, sidebarOpen, settingsVisible, find, findBar }: {
+  workspace: Workspace;
+  panels: DockPanel[];
+  launchers: DockLauncher[];
+  open: boolean;
+  expanded: boolean;
+  sidebarOpen: boolean;
+  settingsVisible: boolean;
+  find: FindView | null;
+  findBar: ReactNode;
+}) {
+  const activeTab = workspace.dockTab;
+  const addMenuOpen = workspace.openMenu === ADD_TAB_MENU;
+  const addMenu = useRef<HTMLDivElement>(null);
+  const addMenuTrigger = useRef<HTMLButtonElement>(null);
+  useDismissibleLayer(addMenuOpen, [addMenu], () => workspace.actions.setOpenMenu(null), addMenuTrigger);
+
+  /** Which dock tab was last asked to take the keyboard, as the count the view watches. */
+  const dockFocus = workspace.dockFocus;
+  const focusTokenFor = useCallback((tab: string) => dockFocus?.tab === tab ? dockFocus.count : 0, [dockFocus]);
+
+  const tabs: DockTab[] = [
+    ...panels.filter((panel) => workspace.dockPanels.includes(panel.id)).map(({ id, title, icon, badge, badgeLabel, badgeTone, pinned }) => ({ id, title, icon, badge, badgeLabel, badgeTone, pinned })),
+    ...workspace.browserTabs.map((tab) => ({ id: tab.id, title: browserTabTitle(tab), icon: Globe })),
+    ...workspace.terminals.map((terminal) => ({ id: terminal.id, title: terminal.title, icon: SquareTerminal })),
+    ...workspace.sideChats.map((chat) => ({ id: chat.id, title: chat.title, icon: GitFork, unread: hasUnreadAttention(chat.thread) })),
+    ...workspace.threadTabs.map((tab) => ({ id: tab.id, title: tab.title, icon: (tab.thread.role && roleIcon(tab.thread.role)) || engineIcon(tab.thread.engine), unread: hasUnreadAttention(tab.thread) })),
+  ];
+
+  /** The strip keeps the keyboard when a tab goes, so closing several in a row never needs the mouse. */
+  const held = useRef({ workspace });
+  held.current.workspace = workspace;
+  const closeTab = useCallback(async (id: string) => {
+    const { dockPanels, browserTabs, terminals, threadTabs, actions, dispatch } = held.current.workspace;
+    if (dockPanels.includes(id)) await actions.closeDockPanel(id);
+    else if (browserTabs.some((tab) => tab.id === id)) await actions.closeBrowserTab(id);
+    else if (terminals.some((terminal) => terminal.id === id)) await actions.closeTerminal(id);
+    else if (threadTabs.some((tab) => tab.id === id)) await actions.closeThreadTab(id);
+    else await dispatch({ type: "side-chat.close", chatId: id });
+    requestAnimationFrame(() => {
+      (document.querySelector<HTMLElement>('.right-dock-tab.active [role="tab"]') ?? addMenuTrigger.current)?.focus();
+    });
+  }, []);
+  const onCloseTab = useCallback((id: string) => void closeTab(id), [closeTab]);
+
+  return (
+    <aside className="right-dock" aria-label="Right panel" hidden={!open}>
+      <div
+        className="right-dock-resizer"
+        role="separator"
+        aria-label="Resize right panel"
+        aria-orientation="vertical"
+        tabIndex={0}
+        data-tip="Drag to resize · Double-click to reset"
+        onFocus={(event) => reportDockWidth(event.currentTarget)}
+        onDoubleClick={(event) => resetRightDock(event.currentTarget)}
+        onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
+        onPointerMove={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeRightDock(event.currentTarget, event.clientX);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            resetRightDock(event.currentTarget);
+            return;
+          }
+          const panel = event.currentTarget.parentElement;
+          const parent = panel?.parentElement;
+          if (!panel || !parent) return;
+          const edge = panel.getBoundingClientRect().left;
+          const bounds = parent.getBoundingClientRect();
+          const step = event.shiftKey ? 50 : 10;
+          /** Home and End take the width to its least and most, as the separator's value reads it. */
+          const to = { ArrowLeft: edge - step, ArrowRight: edge + step, Home: bounds.right, End: bounds.left }[event.key];
+          if (to === undefined) return;
+          event.preventDefault();
+          resizeRightDock(event.currentTarget, to);
+        }}
+      />
+      <DockTabStrip
+        workspace={workspace}
+        tabs={tabs}
+        launchers={launchers}
+        activeTab={activeTab}
+        expanded={expanded}
+        sidebarOpen={sidebarOpen}
+        addMenuOpen={addMenuOpen}
+        addMenu={addMenu}
+        addMenuTrigger={addMenuTrigger}
+        onCloseTab={onCloseTab}
+      />
+      <PartBoundary name="right panel" className="right-dock-content" resetKey={activeTab}>
+        <DockContent
+          workspace={workspace}
+          panels={panels}
+          launchers={launchers}
+          activeTab={activeTab}
+          find={find}
+          findBar={findBar}
+          dockOpen={open}
+          settingsVisible={settingsVisible}
+          focusTokenFor={focusTokenFor}
+          onCloseTab={onCloseTab}
+        />
+      </PartBoundary>
+    </aside>
+  );
+}

@@ -1,0 +1,447 @@
+/** A run's life: the checkout it resolves to, what it reports, and how it ends. */
+import { ack } from "./automations.js";
+import { proposalFailure } from "./proposals.js";
+import { coordinatedStart, withSuggestionStarted } from "./coordinated-start.js";
+import { readDiffFrom, rereadReviewsOf } from "./diff-reads.js";
+import { handOverDraftDock } from "./dock-tabs.js";
+import { WORKTREE_CREATING_ERROR, WORKTREE_RELEASING_ERROR } from "./errors.js";
+import { attendedRun, beginRun, cancelling, pendingStep, processStopped, queuedFor, resolveWorkspaceEffect, runModelOf, sideChannelFor, startRunCommand, withDeliveredMessage, withQueued, withSteeringFailure, withUnsent, withoutPending, withoutStartedDraft, unsent } from "./run-queue.js";
+import { approvalAnsweredIn, runsOf, threadEventIn } from "./run-edits.js";
+import { andThen, applied as joined, type Step } from "./slice.js";
+import { chatFailedIn, sideChatsOf } from "./side-chat-edits.js";
+import { followUps, now, settled, targetId, rejected } from "./shared.js";
+import { memberPullRequestRead } from "./pull-requests.js";
+import { withUsedWorktree } from "./worktree-claims.js";
+import { moveAfterRunSettled } from "./worktree-moves.js";
+import type { WorkspaceEffect, WorkspaceInput, WorkspaceTransition } from "./types.js";
+import { threadTitleFor } from "../attachments.js";
+import { fileTitle } from "../files.js";
+import { announced, postedHeadline, waitingHeadline, type NoticeReason } from "../notices.js";
+import { pasteTitle } from "../pastes.js";
+import { settledHeadline, type RunSurfacing } from "../run-testimony.js";
+import { stopIntentOf } from "../outstanding-stops.js";
+import { settledAfterTestimony, settledEvent, settledTurn, settleTurn, withTurnTestimony, type Settlement } from "../run-settlement.js";
+import { nextSortIndex } from "../thread-order.js";
+import { answerPartId, applyRunEvent, ATTENDED_RUN, threadMark, updateThread, type ActiveRun } from "../thread-run-state.js";
+import { threadBusy, threadToBegin } from "../run-record.js";
+import { leavingThreadIds, projectFor, threadWorkspaceId, threadWorkspaceRoot, worktreeById, worktreeFor } from "../thread-location.js";
+import { DRAFT_DOCK, type PendingRun, type WorkspaceState } from "../workspace-state.js";
+import { dialogsOf, reviewPickerIn } from "../workspace-dialogs.js";
+import { draftOf } from "../state/new-thread-draft.js";
+import type { CreatedWorktree, RunEvent } from "../../contracts/ipc.js";
+import { capabilitiesFor, noModel, threadModel, unknownModel } from "../../domain/agent-engine.js";
+import { normalizeDraft } from "../../domain/agent-draft.js";
+import { catalogOf, engineOffersModel } from "../state/engines.js";
+import { compactableSession, reviewableSession } from "../session-operations.js";
+import { resourceStopped, resourceResumed } from "../resource-stops.js";
+import { isReviewTarget, type ReviewTarget } from "../../domain/review.js";
+import { createConversationMessage, createSentMessage } from "../../domain/conversation.js";
+import { appendMessages } from "../../domain/conversation-updates.js";
+import { isCoordinator, worksUnderCoordinator, type CoordinationThread } from "../../domain/coordination.js";
+import { clampTitle, type Thread } from "../../domain/thread.js";
+import type { WorkspaceRecord } from "../../domain/workspace.js";
+
+export const RUN_INPUTS = ["run.resolved", "run.event"] as const;
+type RunInput = Extract<WorkspaceInput, { type: (typeof RUN_INPUTS)[number] }>;
+
+/** What the user asks of a live run, and what a session reports from beside it, which change only the runs' own state. */
+export const RUN_CONTROL_INPUTS = ["resource.resume", "run.compact", "run.cancel", "run.stop-process", "run.decide", "thread.event", "review.open", "review.close", "review.set-step", "review.start"] as const;
+type RunControlInput = Extract<WorkspaceInput, { type: (typeof RUN_CONTROL_INPUTS)[number] }>;
+
+export function reduceRunControl(state: WorkspaceState, input: RunControlInput): Step {
+  switch (input.type) {
+    case "resource.resume": return resourceResumed(state, input.taskId);
+    case "review.open":
+    case "review.close":
+    case "review.set-step":
+    case "review.start":
+      return reduceReview(state, input);
+
+    case "run.compact": {
+      const taskId = targetId(state, input.taskId);
+      const thread = state.threads.find((item) => item.id === taskId);
+      if (!thread || !compactableSession(state, thread) || threadBusy(state, thread.id)) return {};
+      if (state.creatingWorktrees.includes(thread.id)) return { refusal: WORKTREE_CREATING_ERROR };
+      if (leavingThreadIds(state).has(thread.id)) return { refusal: WORKTREE_RELEASING_ERROR };
+      const project = projectFor(state, thread);
+      const pending: PendingRun = {
+        id: crypto.randomUUID(),
+        runId: crypto.randomUUID(),
+        origin: "composer",
+        operation: { type: "compact" },
+        taskId: thread.id,
+        ...(project ? { projectId: project.id } : {}),
+        text: "",
+        prompt: "",
+        attachments: [],
+      };
+      const resolving = resolveWorkspaceEffect(pending.id, thread, project, worktreeFor(state, thread), false);
+      return { ...pendingStep(state, pending), effects: [resolving] };
+    }
+
+    case "run.cancel": {
+      const taskId = targetId(state, input.taskId);
+      const active = taskId ? state.activeRuns[taskId] : undefined;
+      return active ? cancelling(state, active) : {};
+    }
+
+    case "run.stop-process": {
+      const taskId = targetId(state, input.taskId);
+      return taskId ? processStopped(state, taskId, input.processId) : {};
+    }
+
+    case "run.decide": {
+      const active = state.activeRuns[input.taskId];
+      const approval = active ? state.approvals[active.runId] : undefined;
+      if (!active || !approval || active.runId !== input.runId || approval.approvalId !== input.approvalId) return {};
+      /** Answering a run's question is joining it, exactly as steering into it is. */
+      return andThen(state, { edits: [approvalAnsweredIn(runsOf(state), active.taskId)] }, (next) => ({
+        ...attendedRun(next, active.taskId),
+        effects: [{ type: "send-run-command", command: { type: "approval", taskId: active.taskId, runId: active.runId, approvalId: approval.approvalId, allow: input.allow } }],
+      }));
+    }
+
+    case "thread.event": {
+      const { event } = input;
+      if (event.type === "resource.stopped") return resourceStopped(state, event);
+      if (!state.threads.some((item) => item.id === event.taskId)) return {};
+      return { edits: [threadEventIn(runsOf(state), event)] };
+    }
+  }
+}
+type ReviewInput = Extract<RunControlInput, { type: "review.open" | "review.close" | "review.set-step" | "review.start" }>;
+
+/** A run whose workspace could not be resolved never starts: its message goes back where it came from, and the failure says so where it belongs. */
+export function reduceRunUnresolved(state: WorkspaceState, input: Extract<WorkspaceInput, { type: "run.unresolved" }>): Step<CoordinationThread> {
+  const pending = state.pendingRuns[input.pendingId];
+  if (!pending) return {};
+  const dropped = unsent(state, pending);
+  if (pending.origin === "automation") return { ...dropped, effects: ack(pending, false) };
+  /** A suggestion that could not start says so on its row, ready to start again. */
+  const proposalId = pending.coordination?.proposalId;
+  const leadId = pending.coordination?.coordinatorId;
+  if (proposalId && leadId) return { ...andThen<CoordinationThread>(state, dropped, (next) => proposalFailure(next, leadId, proposalId, input.message)), result: { ok: false, message: input.message } };
+  /** A side chat lives in the dock, so its failure belongs there and not in the main thread's banner. */
+  const chatId = pending.taskId;
+  if (chatId && state.sideChats.some((chat) => chat.id === chatId)) {
+    return { ...andThen(state, dropped, (next) => ({ edits: [chatFailedIn(sideChatsOf(next), chatId, input.message)] })), result: { ok: false, message: input.message } };
+  }
+  return { ...dropped, refusal: input.message };
+}
+
+/**
+ * A run starting in the workspace it resolved to, and what it reports. Both still change the whole
+ * state: a report folds into threads and runs in one pass on the hottest path there is.
+ */
+export function reduceRuns(state: WorkspaceState, input: Exclude<RunInput, { type: "run.unresolved" }>): WorkspaceTransition {
+  switch (input.type) {
+    case "run.resolved": {
+      const pending = state.pendingRuns[input.pendingId];
+      if (!pending) return settled(state);
+      let next = withoutPending(state, input.pendingId);
+      const project = pending.projectId ? next.projects.find((item) => item.id === pending.projectId) : undefined;
+      /**
+       * A project with no workspace of its own adopts the one the picker just opened for the same
+       * folder. Where a project lives is the picker's to say, so no run ever moves one.
+       */
+      const adopts = project && !project.workspaceId && input.workspace.kind === "project" && input.workspace.root === project.root;
+      if (adopts) {
+        next = { ...next, projects: next.projects.map((item) => item.id === project.id ? { ...item, workspaceId: input.workspace.id } : item) };
+      }
+      const stopped = pending.taskId && next.threads.find(thread => thread.id === pending.taskId)?.resourceStop;
+      if (stopped) {
+        if (input.worktree && pending.projectId) next = withUsedWorktree(next, { ...input.worktree, projectId: pending.projectId }, input.worktree.id);
+        return pending.origin === "automation" ? settled(next, ack(pending, false)) : rejected(withUnsent(next, pending), "Resume this thread after its memory stop before starting another run.");
+      }
+      const gone = modelGone(next, pending);
+      if (gone) return gone;
+      if (pending.operation?.type === "compact") return startCompaction(next, pending, input.workspace);
+      if (pending.operation?.type === "review") return startReview(next, pending, input.workspace);
+      if (pending.operation?.type === "resume") return startResume(next, pending, input.workspace);
+      return pending.origin === "automation"
+        ? startAutomationRun(next, pending, input.workspace, input.worktree)
+        : startComposerRun(next, pending, input.workspace, input.worktree);
+    }
+
+    case "run.event": {
+      const { event: reported } = input;
+      if (!(reported.type === "run.status" && ["cancelled", "failed", "succeeded"].includes(reported.status)) && state.threads.find(thread => thread.id === reported.taskId)?.resourceStop) return settled(state);
+      /** A turn the agent started itself belongs to no run yet, so the thread takes one on for it. */
+      const opening = reported.type === "run.started" && reported.agentInitiated && !state.activeRuns[reported.taskId] && state.threads.some((thread) => thread.id === reported.taskId);
+      const opened = opening ? beginRun(state, reported.taskId, reported.runId, ATTENDED_RUN, undefined, "agent") : state;
+      const active = opened.activeRuns[reported.taskId];
+      if (!active || reported.runId !== active.runId || reported.sequence <= active.sequence) return settled(state);
+      /** Settled before the run is applied: a terminal status takes the run, and its provenance, away. */
+      const ending = turnEnding(opened, active, reported);
+      const event = ending && reported.type === "run.status" ? settledEvent(reported, ending) : reported;
+      const applied = applyRunEvent(opened, event);
+      if (event.type === "assistant.delta") {
+        const thread = applied.threads.find((item) => item.id === event.taskId);
+        const messageId = event.artifact ? event.messageId : answerPartId(applied.activeRuns[event.taskId], event.messageId);
+        const message = thread?.messages.find((item) => item.id === messageId);
+        return settled(applied, message && /\.(?:png|jpe?g|gif|webp)\b/i.test(event.text) ? [{
+          type: "preserve-message-images", text: message.text,
+          root: threadWorkspaceRoot(applied, thread) ?? "", messageId,
+        }] : []);
+      }
+      /** Compacting is not a turn, so it is no news for a coordinator. */
+      if (ending?.restoresTestimony) return settledTurn(applied, event.taskId, ending, active, now());
+      const testified = ending ? withTurnTestimony(applied, event.taskId, ending, active) : applied;
+      let next = event.type === "computer-use.setup-required" ? { ...testified, computerUseSetup: true } : testified;
+      const noticed = next.threads.find((thread) => thread.id === event.taskId);
+      /** A turn that files its thread away finishes without a word; one that failed still says so. */
+      const notice = noticed && !ending?.dismisses ? runNotice(noticed, active, event, ending?.surfacing ?? null) : null;
+      const said = noticed && notice ? announced(next, noticed, notice.headline, notice.reason) : [];
+      if (event.type === "queued.delivered") next = withDeliveredMessage(next, event.taskId, event.messageId);
+      if (event.type === "queued.steer-failed") next = withSteeringFailure(next, event.taskId, event.messageId, event.message);
+      const finished = ending?.status === "succeeded" || ending?.status === "failed";
+      const workspaceId = threadWorkspaceId(state, state.threads.find((thread) => thread.id === event.taskId));
+      /** A review the thread has open is only as current as the run that was writing under it. */
+      const settledDiff = finished && workspaceId ? rereadReviewsOf(next, event.taskId, workspaceId) : settled(next);
+      next = settledDiff.state;
+      /** A turn under a coordinator may have opened, pushed or merged its pull request, so it is read again here. */
+      const reread = finished ? turnPullRequestRead(next, event.taskId) : null;
+      if (reread) next = reread.state;
+      const environment: WorkspaceEffect[] = finished && workspaceId
+        ? [{ type: "refresh-environment", workspaceId, taskId: event.taskId, runId: event.runId, followUp: true }, ...settledDiff.effects, ...reread ? [{ ...reread.effect, followUp: true as const }] : []]
+        : [];
+      if (!ending) return settled(next, [...environment, ...said]);
+      const moved = joined(next, moveAfterRunSettled(next, event.taskId, ending.status));
+      const drained = settledAfterTestimony(moved.state, event.taskId, ending, active, now());
+      return settled(drained.state, [...environment, ...said, ...moved.effects, ...drained.effects]);
+    }
+
+  }
+}
+
+/**
+ * How a run's turn ends, if this event ends it. A run the user or Stop all asked to end is being
+ * stopped, however it ends first; Stop all's stop is the one it is heard as.
+ */
+function turnEnding(state: WorkspaceState, active: ActiveRun, event: RunEvent): Settlement | null {
+  if (event.type !== "run.status" || event.status === "running" || event.status === "awaiting-approval") return null;
+  const stop = stopIntentOf(state, active);
+  return settleTurn({
+    status: event.status,
+    ...(event.message === undefined ? {} : { message: event.message }),
+    ...(event.limit ? { limit: event.limit } : {}),
+    run: active,
+    ...(stop ? { stop } : {}),
+  });
+}
+
+/**
+ * What this event puts on the desktop, and why. A run that settles says how it ended, a coordinator's
+ * in the words it posted; a run that stops to ask says what it is waiting for, and only when a
+ * person is the one it waits on.
+ */
+function runNotice(thread: Thread, active: ActiveRun, event: RunEvent, surfacing: RunSurfacing | null): { headline: string; reason: NoticeReason } | null {
+  if (active.origin === "composer" && event.type === "approval.requested") return { headline: waitingHeadline({ toolName: event.intent.name }), reason: "waiting" };
+  if (active.origin === "composer" && event.type === "question.requested") return { headline: waitingHeadline(event.request.questions[0]), reason: "waiting" };
+  const headline = settledHeadline(surfacing, event.type === "run.status" ? event.message : undefined);
+  if (!headline) return null;
+  if (surfacing === "failed") return { headline, reason: "failed" };
+  return { headline: (isCoordinator(thread) && postedHeadline(thread, active.messagesBefore)) || headline, reason: "finished" };
+}
+
+/** The native review picker, and the review run it starts. */
+function reduceReview(state: WorkspaceState, input: ReviewInput): Step {
+  if (input.type === "review.close") return state.reviewPicker ? { edits: [reviewPickerIn(dialogsOf(state), null)] } : {};
+  if (input.type === "review.set-step") {
+    const picker = state.reviewPicker;
+    if (!picker || picker.taskId !== state.currentId || !reviewableThread(state, picker.taskId)) return {};
+    return { edits: [reviewPickerIn(dialogsOf(state), { ...picker, step: input.step })] };
+  }
+  const taskId = targetId(state, input.taskId);
+  const thread = reviewableThread(state, taskId);
+  if (!thread) return {};
+  if (input.type === "review.open") return { edits: [reviewPickerIn(dialogsOf(state), { taskId: thread.id, step: "targets" })], clearsError: true };
+  if (!isReviewTarget(input.target)) return {};
+  const project = projectFor(state, thread);
+  const pending: PendingRun = {
+    id: crypto.randomUUID(),
+    runId: crypto.randomUUID(),
+    origin: "composer",
+    operation: { type: "review", target: input.target },
+    taskId: thread.id,
+    ...(project ? { projectId: project.id } : {}),
+    text: "",
+    prompt: "",
+    attachments: [],
+  };
+  const resolving = resolveWorkspaceEffect(pending.id, thread, project, worktreeFor(state, thread), false);
+  const started = pendingStep(state, pending);
+  return { ...started, edits: [reviewPickerIn(dialogsOf(state), null), ...started.edits ?? []], effects: [resolving] };
+}
+
+/**
+ * The read a thread under a coordinator asks for as its turn ends, if its work is or has been on a
+ * pull request. One under a coordinator on another computer is read here, which holds its checkout.
+ */
+function turnPullRequestRead(state: WorkspaceState, taskId: string) {
+  const thread = state.threads.find((item) => item.id === taskId);
+  if (!thread || !worksUnderCoordinator(state.threads, thread)) return null;
+  return thread.brief?.delivers === "pull-request" || thread.pullRequest ? memberPullRequestRead(state, thread) : null;
+}
+
+/** Every run on a thread goes to the thread's model, which its engine must still offer here; a tick that cannot start says so to its automation. */
+function modelGone(state: WorkspaceState, pending: PendingRun): WorkspaceTransition | null {
+  const thread = pending.taskId ? state.threads.find((item) => item.id === pending.taskId) : undefined;
+  if (!thread) return null;
+  const model = threadModel(catalogOf(state), thread);
+  if (model !== undefined && engineOffersModel(state, thread.engine, model)) return null;
+  return pending.origin === "automation" ? settled(state, ack(pending, false)) : rejected(withUnsent(state, pending), model === undefined ? noModel(thread.engine) : unknownModel(model));
+}
+
+function startCompaction(state: WorkspaceState, pending: PendingRun, workspace: WorkspaceRecord): WorkspaceTransition {
+  const thread = pending.taskId ? state.threads.find((item) => item.id === pending.taskId) : undefined;
+  if (!thread?.contextUsage || !compactableSession(state, thread) || state.activeRuns[thread.id]) return settled(state);
+  const command = {
+    ...startRunCommand(state, thread, pending.runId, "", workspace.id),
+    operation: { type: "compact" as const, preTokens: thread.contextUsage.tokens },
+  };
+  return settled(beginRun(state, thread.id, pending.runId, { ...ATTENDED_RUN, operation: "compact" }), [{ type: "start-run", command }]);
+}
+
+function reviewableThread(state: WorkspaceState, taskId: string | null) {
+  const thread = state.threads.find((item) => item.id === taskId);
+  return thread && reviewableSession(state, thread) && !threadBusy(state, thread.id) ? thread : undefined;
+}
+
+function startReview(state: WorkspaceState, pending: PendingRun, workspace: WorkspaceRecord): WorkspaceTransition {
+  const thread = pending.taskId ? reviewableThread(state, pending.taskId) : undefined;
+  const target: ReviewTarget | undefined = pending.operation?.type === "review" ? pending.operation.target : undefined;
+  if (!thread || !target) return settled(state);
+  const command = {
+    ...startRunCommand(state, thread, pending.runId, "", workspace.id),
+    operation: { type: "review" as const, target },
+    /** A copied thread must own a fork before the review adds findings to its history. */
+    ...(thread.inheritedContinuation ? { forkContinuation: true as const } : {}),
+  };
+  return settled(beginRun(state, thread.id, pending.runId, { ...ATTENDED_RUN, operation: "review" }), [{ type: "start-run", command }]);
+}
+
+function startComposerRun(state: WorkspaceState, pending: PendingRun, workspace: WorkspaceRecord, worktree?: CreatedWorktree): WorkspaceTransition {
+  const existing = pending.taskId ? state.threads.find((item) => item.id === pending.taskId) : undefined;
+  if (pending.taskId && !existing) return rejected(state, "This thread was removed before its message could be sent.");
+  if (existing?.archivedAt !== undefined) return rejected(withUnsent(state, pending), "This thread was archived before its message could be sent. Restore it from Archived threads in Settings to send it again.");
+  if (pending.taskId && state.activeRuns[pending.taskId]) return rejected(withUnsent(state, pending), "This thread started another run before its message could be sent. Send the message again.");
+  /** A checkout made on the way here has no record yet; it belongs to the project the run resolved in. */
+  const created = worktree && pending.projectId ? { ...worktree, projectId: pending.projectId } : undefined;
+  /** A thread that does not exist yet claims whichever checkout the send named, if it named one. */
+  const arriving = created ?? worktreeFor(state, existing) ?? worktreeById(state, pending.worktreeId);
+  /** This thread's own first run inside a checkout forks its session rather than resuming it there. */
+  const entering = Boolean(arriving) && existing?.worktreeEnteredAt === undefined;
+  const catalog = catalogOf(state);
+  const engine = pending.engine ?? state.draftEngine;
+  const model = pending.model ?? state.draftModel;
+  /** The catalogue may have changed while the run found its workspace. */
+  if (!existing && !engineOffersModel(state, engine, model)) return rejected(withUnsent(state, pending), unknownModel(model));
+  /** A reviewer runs on the mode its engine gives a run nobody watches, so its round never waits on an approval. */
+  const choice = normalizeDraft(catalog, {
+    ...draftOf(state),
+    engine,
+    model,
+    ...(pending.effort ? { effort: pending.effort } : {}),
+    ...(pending.role === "reviewer" ? { policy: capabilitiesFor(engine).unattendedPolicy } : {}),
+  }, pending.role === "coordinator" ? "coordinator" : undefined);
+  const thread: Thread = existing ?? {
+    id: crypto.randomUUID(),
+    title: pending.title ? clampTitle(pending.title) : threadTitleFor(pending.text || pasteTitle(pending.pastes ?? []) || fileTitle(pending.files ?? []), pending.attachments.map((path) => ({ path, labels: [] }))),
+    ...(pending.projectId ? { projectId: pending.projectId } : {}),
+    executionPolicy: choice.policy,
+    engine: choice.engine,
+    model: choice.model,
+    effort: choice.effort,
+    ...(capabilitiesFor(choice.engine).fastMode ? { fastMode: choice.fastMode } : {}),
+    ...(pending.role ? { role: pending.role } : {}),
+    ...(pending.coordination?.brief ? { brief: pending.coordination.brief } : {}),
+    messages: [],
+    continuationStatus: "none",
+    lastChangeSnapshot: { files: [], capturedAt: now() },
+    sortIndex: nextSortIndex(state.threads),
+    createdAt: now(),
+    rankedAt: now(),
+    updatedAt: now(),
+  };
+  if (created && !created.name) created.name = thread.title;
+  const message = createSentMessage({ ...pending, origin: pending.messageOrigin });
+  /** Only a thread that was somewhere else is arriving; one already in this checkout has said so. */
+  const arrival = arriving && existing?.worktreeId !== arriving.id
+    ? [createConversationMessage("system", `Moved into a worktree at ${arriving.root}`, `Detached at ${arriving.baseCommit.slice(0, 7)}`)]
+    : [];
+  const located = arriving ? { ...thread, worktreeId: arriving.id, worktreeEnteredAt: thread.worktreeEnteredAt ?? now() } : thread;
+  /** A copied thread forks the session it inherited until a session of its own comes back to continue. */
+  const inherited = located.inheritedContinuation;
+  const { thread: coordinated, prompt } = coordinatedStart(state, pending, located, existing);
+  const updated = { ...coordinated, messages: [...coordinated.messages, ...arrival, message], updatedAt: now() };
+  const listed = existing ? state.threads.map((item) => item.id === thread.id ? updated : item) : [updated, ...state.threads];
+  const { threads, startingProposals } = withSuggestionStarted(state, pending, existing, listed, updated);
+  /** Only a thread the user's own send just created needs looking at; anything else leaves them where they are. */
+  const focusing = !existing && pending.draftKey !== undefined;
+  /** Only the composer's own send spent the draft's placement; a thread started any other way leaves it alone. */
+  const spent = focusing ? { draftBranch: null, draftWorktree: false, draftWorktreeId: null, draftRole: null } : {};
+  const owning = withUsedWorktree(focusing ? handOverDraftDock(state, thread.id) : state, created, arriving?.id);
+  const started = beginRun({ ...owning, threads, startingProposals, ...spent, ...(focusing ? { currentId: thread.id } : {}) }, thread.id, pending.runId, pending.usersOwn ? { ...ATTENDED_RUN, usersOwn: true } : ATTENDED_RUN, undefined, pending.warming ? "warming" : undefined);
+  const drained = pending.queuedIds
+    ? withQueued(started, thread.id, queuedFor(started, thread.id).filter((message) => !pending.queuedIds!.includes(message.id)))
+    : started;
+  /** Only a new thread nobody named has a title written for it, read from what its first message says. */
+  const titling: WorkspaceEffect[] = existing || pending.title || (!pending.text && pending.attachments.length === 0) ? [] : [{ type: "suggest-title", taskId: thread.id, engine: thread.engine, model: runModelOf(state, thread), text: pending.text, attachments: pending.attachments }];
+  const command = {
+    ...startRunCommand({ ...state, threads }, updated, pending.runId, prompt, workspace.id),
+    ...((entering || inherited) && updated.continuation ? { forkContinuation: true as const } : {}),
+    ...sideChannelFor(state, updated),
+  };
+  /**
+   * A review carried over from the draft was read against the project, and against a dock that no
+   * longer exists, so it is asked for again under the thread and the checkout the send settled on.
+   */
+  const handed = focusing && state.diffs[DRAFT_DOCK];
+  const reviewing = handed ? readDiffFrom(drained, thread.id, workspace.id, handed.range) : settled(drained);
+  return settled(
+    pending.draftKey ? withoutStartedDraft(reviewing.state, pending.draftKey, pending) : reviewing.state,
+    [{ type: "start-run", command }, ...titling, ...followUps(reviewing.effects)],
+    { ok: true, taskId: thread.id },
+  );
+}
+
+/** A thread picked back up after its usage limit lifted or an update restarted the app: nobody wrote to it, so it is told to carry on. */
+function startResume(state: WorkspaceState, pending: PendingRun, workspace: WorkspaceRecord): WorkspaceTransition {
+  const thread = threadToBegin(state, pending.taskId);
+  if (!thread) return settled(state);
+  const update = pending.operation?.type === "resume" && pending.operation.after === "update";
+  const resumed = updateThread(state, thread.id, (item) => ({
+    ...item,
+    messages: appendMessages(item.messages, [createConversationMessage("system", pending.operation?.type === "resume" && pending.operation.after === "memory" ? "Resuming after a memory stop. Check interrupted actions before repeating them." : update ? "App updated. Resuming." : "Usage limit reset. Resuming.")]),
+    updatedAt: now(),
+  }));
+  const command = {
+    ...startRunCommand(state, thread, pending.runId, pending.prompt, workspace.id),
+    ...(thread.inheritedContinuation && thread.continuation ? { forkContinuation: true as const } : {}),
+    ...sideChannelFor(state, thread),
+  };
+  return settled(beginRun(resumed, thread.id, pending.runId, ATTENDED_RUN, undefined, update ? "carrying-on" : "warming"), [{ type: "start-run", command }]);
+}
+
+function startAutomationRun(state: WorkspaceState, pending: PendingRun, workspace: WorkspaceRecord, worktree?: CreatedWorktree): WorkspaceTransition {
+  const taskId = pending.taskId!;
+  const thread = threadToBegin(state, taskId);
+  if (!thread) return settled(state, ack(pending, false));
+  /** A quiet tick's own label counts for nothing in the thread's activity, like the rest of its run. */
+  const message = { ...createSentMessage({ text: pending.text, origin: pending.messageOrigin }), ...(pending.quiet ? { withdrawn: true as const } : {}) };
+  const created = worktree && thread.projectId ? { ...worktree, name: worktree.name ?? thread.title, projectId: thread.projectId } : undefined;
+  const entered = created ?? worktreeFor(state, thread);
+  const withMessage = updateThread(withUsedWorktree(state, created, entered?.id), taskId, (item) => ({
+    ...item,
+    ...(entered ? { worktreeId: entered.id, worktreeEnteredAt: item.worktreeEnteredAt ?? now() } : {}),
+    messages: [...item.messages, message],
+    updatedAt: now(),
+  }));
+  /** Taken before the label lands, so a tick that settles unseen rolls that back with the rest of it. */
+  return settled(beginRun(withMessage, taskId, pending.runId, { origin: "automation", quiet: pending.quiet === true }, threadMark(thread)), [
+    /** Only a tick that settles unseen answers its own questions; every other run waits for the user as it always has. */
+    { type: "start-run", command: { ...startRunCommand(state, thread, pending.runId, pending.prompt, workspace.id, pending.policy ?? thread.executionPolicy), ...(pending.unattended ? { unattended: true as const } : {}) } },
+    ...ack(pending, true),
+  ]);
+}

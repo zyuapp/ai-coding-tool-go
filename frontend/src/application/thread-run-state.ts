@@ -1,0 +1,638 @@
+import type { PendingQuestion } from "../domain/agent-question.js";
+import type { BackgroundEvent, RunEvent, ThreadEvent, WorkflowEvent } from "../contracts/ipc.js";
+import type { BackgroundProcess, RetryNotice, Subagent, SubagentMetadata, SubagentReport } from "../domain/run.js";
+import type { Workflow } from "../domain/workflow.js";
+import { createConversationMessage, createFailureMessage } from "../domain/conversation.js";
+import { runOutcome, type ThreadOutcome } from "../domain/thread-run.js";
+import type { Thread } from "../domain/thread.js";
+import { appendMessages, replaceLastMessage, withdrawMessages } from "../domain/conversation-updates.js";
+import { withMemoryUnheard, type CoordinationReport } from "../domain/coordination.js";
+import { defaultModelFor } from "../domain/agent-engine.js";
+import type { ThreadsState } from "./state/threads.js";
+import type { RunFeedsState } from "./state/runs.js";
+
+/**
+ * Where a live run stands. Only a retrying run carries the notice it retries under, and a run awaiting
+ * approval is the only one whose approval is shown. `withRunPhase` is the one way a run changes phase.
+ */
+export type RunPhase =
+  | { status: "running" | "compacting" | "awaiting-approval"; retry?: never }
+  | { status: "retrying"; retry: RetryNotice };
+
+export type ActiveRun = RunProvenance & RunPhase & {
+  taskId: string;
+  runId: string;
+  sequence: number;
+  questions?: PendingQuestion[];
+  /** Whether this run has said it found something worth surfacing. */
+  notified: boolean;
+  /** Whether the run answered for itself with either tool. Answering neither is what surfaces a quiet tick. */
+  acknowledged: boolean;
+  /** Every issue this run reported, held back or not, so settling can tell which handled ones have gone away. */
+  reportedIssues: string[];
+  /** How many messages the thread held when this run began, so a silent one can withdraw its own. */
+  messagesBefore: number;
+  /** Where the thread stood when this run began, so a silent one can leave it exactly there. */
+  before: ThreadMark;
+  /** How many times another message interrupted each streamed answer; each interruption starts a new part. */
+  answerParts?: Record<string, number>;
+  /**
+   * Set on a run resuming a thread after its usage limit lifted, until its first answer. That answer
+   * rebuilds the context the wait let expire, and the next thread in line waits for it.
+   */
+  warming?: true;
+  /**
+   * Set on the turn the agent opens itself on hearing that what Stop all stopped has stopped, which
+   * ends quietly however it ends.
+   */
+  answersStop?: true;
+  /** Set on a turn the agent opened itself, which a paired computer's coordinator reads as this does. */
+  agentInitiated?: true;
+  /** Set once the user asked this run to stop, so a usage limit that gets to it first cannot outlast the stop. */
+  cancelling?: true;
+  /** Set once its thread is dismissed mid-run, so the turn that finishes leaves no verdict to dismiss again. */
+  dismissed?: true;
+};
+
+/**
+ * What a tick has to put back to have said nothing at all: how the run before it ended, its verdict
+ * and the report it made, which beginning a run always supersedes, and the moments the sidebar
+ * orders threads by.
+ */
+export type ThreadMark = {
+  updatedAt: number;
+  rankedAt?: number;
+  runEndedAt?: number;
+  runEndedAs?: ThreadOutcome;
+  outcome?: ThreadOutcome;
+  outcomeUnread?: true;
+  report?: CoordinationReport;
+};
+
+export function threadMark(thread: Thread | undefined): ThreadMark {
+  return {
+    updatedAt: thread?.updatedAt ?? 0,
+    ...(thread === undefined ? {} : { rankedAt: thread.rankedAt }),
+    ...(thread?.runEndedAt === undefined ? {} : { runEndedAt: thread.runEndedAt }),
+    ...(thread?.runEndedAs === undefined ? {} : { runEndedAs: thread.runEndedAs }),
+    ...(thread?.outcome === undefined ? {} : { outcome: thread.outcome }),
+    ...(thread?.outcomeUnread ? { outcomeUnread: true as const } : {}),
+    ...(thread?.report ? { report: thread.report } : {}),
+  };
+}
+
+/**
+ * Puts a thread back where a tick found it: the messages that tick wrote are withdrawn, so they
+ * count for nothing in the thread's activity, the moments it moved are rolled back, and the verdict
+ * and report beginning the run superseded are returned, unread as they were. A tick that says
+ * nothing takes nothing away either: only a report the tick made of where its work ended up stands,
+ * since one that it was working ended with the tick.
+ */
+export function withdrawRun(thread: Thread, from: number, before: ThreadMark): Thread {
+  const { runEndedAt: _stamped, runEndedAs: _ended, outcome: _superseded, outcomeUnread: _unread, ...rest } = thread;
+  return {
+    ...rest,
+    messages: withdrawMessages(thread.messages, from),
+    updatedAt: before.updatedAt,
+    ...(before.rankedAt === undefined ? {} : { rankedAt: before.rankedAt }),
+    ...(before.runEndedAt === undefined ? {} : { runEndedAt: before.runEndedAt }),
+    ...(before.runEndedAs === undefined ? {} : { runEndedAs: before.runEndedAs }),
+    ...(before.outcome === undefined ? {} : { outcome: before.outcome }),
+    ...(before.outcomeUnread ? { outcomeUnread: true as const } : {}),
+    ...(before.report && (!thread.report || thread.report.state === "working") ? { report: before.report } : {}),
+  };
+}
+
+/**
+ * Who a run answers to. A run is the composer's unless the scheduler started it, and a human joining
+ * a scheduled run makes it theirs again, so nothing is ever quiet by inference.
+ */
+export type RunProvenance = {
+  origin: "composer" | "automation";
+  quiet: boolean;
+  /** A native thread operation that starts without adding a user message. */
+  operation?: "compact" | "review";
+  /**
+   * Set on a turn the user's own message started, until a message from anyone else joins it. The
+   * user is already there, so its coordinator hears it ended with its next wake rather than by one.
+   */
+  usersOwn?: true;
+};
+
+export const ATTENDED_RUN: RunProvenance = { origin: "composer", quiet: false };
+
+export type ThreadRunStatus = "idle" | "running" | "stopped";
+
+export type ApprovalView = {
+  approvalId: string;
+  taskId: string;
+  runId: string;
+  title: string;
+  description: string;
+  toolName: string;
+  input: Record<string, unknown>;
+};
+
+/**
+ * The unfinished end of a streaming message. It stays out of the thread so nothing half-written is
+ * persisted, and the next committed block replaces it.
+ */
+export type StreamingTail = {
+  messageId: string;
+  text: string;
+};
+
+/** What a run report may change: its thread, and the feeds the run reports into. */
+export type RunTransitionState = ThreadsState & RunFeedsState;
+
+function now() {
+  return Date.now();
+}
+
+/**
+ * A run is open on its thread until it ends, so one the app quits under is known as cut off when the
+ * thread is restored, and its start ranks the thread. Compacting is not a turn, and a quiet scheduled
+ * run only speaks through what it finds, so neither is.
+ */
+export function openedTurn(thread: Thread, provenance: Pick<RunProvenance, "origin" | "quiet" | "operation">): Thread {
+  return provenance.operation === "compact" || provenance.origin === "automation" && provenance.quiet ? thread : { ...thread, runOpen: true, rankedAt: now() };
+}
+
+/** What a thread whose work finished at `at` reads as: unread unless the user was looking at it. */
+export type FinishedVerdict = Pick<ThreadMark, "runEndedAt" | "rankedAt" | "outcomeUnread"> & { outcome: "finished"; runEndedAs: "finished" };
+
+export function finishedVerdict(at: number, onScreen: boolean): FinishedVerdict {
+  return { outcome: "finished", runEndedAs: "finished", runEndedAt: at, rankedAt: at, ...(onScreen ? {} : { outcomeUnread: true as const }) };
+}
+
+/** Scheduled runs carry their own framing: nobody is present to answer a question or end the loop. */
+export function automationRunPrompt(prompt: string, runNumber: number, surfaceWhen?: string, endsWhen?: string) {
+  const stop = endsWhen
+    ? `This automation ends when: ${endsWhen} Once that holds, call the aicodingtool-automation stop tool to end it.`
+    : "If the automation's stop condition is now met, call the aicodingtool-automation stop tool to end it.";
+  const framing = `This is automated run #${runNumber} of this task's automation, started by AICodingTool's scheduler with no user watching. ${stop}`;
+  return `${prompt}\n\n---\n${framing}${surfaceWhen ? `\n\n${quietFraming(surfaceWhen)}` : ""}`;
+}
+
+/** A quiet run has to earn its silence: saying nothing at all is what a broken run does too. */
+function quietFraming(surfaceWhen: string) {
+  return `This run is quiet: it settles without reaching the user unless you say otherwise. Surface it when: ${surfaceWhen} If that is what you found, call the aicodingtool-automation notify tool with a headline before you finish. If it is not, call nothing_to_report with what you checked. Call neither and the run surfaces as an ordinary one, which is what a run that could not do its job should do.`;
+}
+
+export function withActiveRun<T extends RunFeedsState>(state: T, threadId: string, run: ActiveRun | null): T {
+  if (run) return { ...state, activeRuns: { ...state.activeRuns, [threadId]: run } } as T;
+  const { [threadId]: _finished, ...activeRuns } = state.activeRuns;
+  return { ...state, activeRuns } as T;
+}
+
+/** A run moved to another phase: what the phase it left carried goes with it. */
+export function withRunPhase<T extends RunFeedsState>(state: T, threadId: string, phase: RunPhase): T {
+  const run = state.activeRuns[threadId];
+  if (!run) return state;
+  const { status: _left, retry: _retry, ...record } = run;
+  return withActiveRun(state, threadId, { ...record, ...phase });
+}
+
+/** The run's approval is answered: it goes, and the run is running again. */
+export function withApprovalAnswered<T extends RunFeedsState>(state: T, threadId: string): T {
+  const run = state.activeRuns[threadId];
+  if (!run) return state;
+  const { [run.runId]: _answered, ...approvals } = state.approvals;
+  return withRunPhase({ ...state, approvals }, threadId, { status: "running" });
+}
+
+export function withRunStatus<T extends Pick<RunFeedsState, "runStatuses">>(state: T, threadId: string, status: ThreadRunStatus): T {
+  if (status !== "idle") return { ...state, runStatuses: { ...state.runStatuses, [threadId]: status } } as T;
+  const { [threadId]: _cleared, ...runStatuses } = state.runStatuses;
+  return { ...state, runStatuses } as T;
+}
+
+export function withStreamingTail<T extends RunFeedsState>(state: T, threadId: string, tail: StreamingTail | null): T {
+  if (tail) return { ...state, streamingTails: { ...state.streamingTails, [threadId]: tail } } as T;
+  if (!(threadId in state.streamingTails)) return state;
+  const { [threadId]: _cleared, ...streamingTails } = state.streamingTails;
+  return { ...state, streamingTails } as T;
+}
+
+export function withBackgroundProcesses<T extends Pick<RunFeedsState, "backgroundProcesses">>(state: T, threadId: string, processes: BackgroundProcess[]): T {
+  if (processes.length) return { ...state, backgroundProcesses: { ...state.backgroundProcesses, [threadId]: processes } } as T;
+  if (!(threadId in state.backgroundProcesses)) return state;
+  const { [threadId]: _ended, ...backgroundProcesses } = state.backgroundProcesses;
+  return { ...state, backgroundProcesses } as T;
+}
+
+export function withWorkflows<T extends Pick<RunFeedsState, "workflows">>(state: T, threadId: string, workflows: Workflow[]): T {
+  if (workflows.length) return { ...state, workflows: { ...state.workflows, [threadId]: workflows } } as T;
+  if (!(threadId in state.workflows)) return state;
+  const { [threadId]: _ended, ...rest } = state.workflows;
+  return { ...state, workflows: rest } as T;
+}
+
+/** Every workflow record but the named one, with that one replaced by what the update returns. */
+function updateWorkflow<T extends RunFeedsState>(state: T, threadId: string, id: string, update: (existing?: Workflow) => Workflow): T {
+  const workflows = state.workflows[threadId] ?? [];
+  const existing = workflows.find((workflow) => workflow.id === id);
+  return withWorkflows(state, threadId, existing
+    ? workflows.map((workflow) => workflow.id === id ? update(workflow) : workflow)
+    : [...workflows, update(undefined)]);
+}
+
+export function updateThread<T extends RunTransitionState>(state: T, threadId: string, update: (thread: Thread) => Thread): T {
+  return { ...state, threads: state.threads.map((thread) => thread.id === threadId ? update(thread) : thread) } as T;
+}
+
+export function withSubagents<T extends Pick<RunFeedsState, "subagents">>(state: T, threadId: string, subagents: Subagent[]): T {
+  if (subagents.length) return { ...state, subagents: { ...state.subagents, [threadId]: subagents } } as T;
+  if (!(threadId in state.subagents)) return state;
+  const { [threadId]: _cleared, ...rest } = state.subagents;
+  return { ...state, subagents: rest } as T;
+}
+
+function updateSubagent<T extends RunFeedsState>(state: T, threadId: string, subagentId: string, update: (subagent?: Subagent) => Subagent): T {
+  const held = state.subagents[threadId] ?? [];
+  const index = held.findIndex((subagent) => subagent.id === subagentId);
+  if (index === -1) return withSubagents(state, threadId, [...held, update()]);
+  const replaced = update(held[index]);
+  if (replaced === held[index]) return state;
+  return withSubagents(state, threadId, held.map((subagent, position) => position === index ? replaced : subagent));
+}
+
+/** Shared subagent state changes, whether a run carries them or a session reports them later. */
+function applySubagentReport<T extends RunFeedsState>(state: T, threadId: string, event: SubagentReport): T {
+  const metadata = (details: SubagentMetadata): SubagentMetadata => ({
+    ...(details.model !== undefined ? { model: details.model } : {}),
+    ...(details.effort !== undefined ? { effort: details.effort } : {}),
+    ...(details.prompt !== undefined ? { prompt: details.prompt } : {}),
+  });
+  if (event.type === "subagent.metadata") {
+    return updateSubagent(state, threadId, event.id, (existing) => ({
+      ...(existing ?? { id: event.id, description: "Subagent", status: "working" as const, startedAt: now(), activity: [] }),
+      ...metadata(event),
+      ...(existing?.prompt !== undefined ? { prompt: existing.prompt } : {}),
+    }));
+  }
+  if (event.type === "subagent.started") {
+    return updateSubagent(state, threadId, event.id, (existing) => {
+      const { finishedAt: _finishedAt, lastToolName: _lastToolName, stopping: _stopping, ...preserved } = existing ?? {};
+      return {
+        ...preserved,
+        ...metadata(event),
+        /** Resuming a child may repeat started with a new message; Prompt remains its original assignment. */
+        ...(existing?.prompt !== undefined ? { prompt: existing.prompt } : {}),
+        id: event.id,
+        description: event.description,
+        ...(event.agentType ? { agentType: event.agentType } : {}),
+        ...(event.sessionScoped ? { sessionScoped: true as const } : {}),
+        status: "working",
+        startedAt: existing?.startedAt ?? now(),
+        activity: existing?.activity ?? [],
+      };
+    });
+  }
+  if (event.type === "subagent.status") {
+    return updateSubagent(state, threadId, event.id, (existing) => {
+      const base: Subagent = existing ?? {
+        id: event.id,
+        description: "Subagent",
+        status: "working",
+        startedAt: now(),
+        activity: [],
+      };
+      if (event.status === "working") {
+        const { finishedAt: _finishedAt, lastToolName: _lastToolName, ...preserved } = base;
+        return { ...preserved, status: "working", ...(event.summary ? { summary: event.summary } : {}) };
+      }
+      const { finishedAt: _finishedAt, stopping: _stopping, ...preserved } = base;
+      return { ...preserved, status: "idle", ...(event.summary ? { summary: event.summary } : {}) };
+    });
+  }
+  if (event.type === "subagent.progress") {
+    return updateSubagent(state, threadId, event.id, (existing) => ({
+      ...(existing ?? {
+        id: event.id,
+        status: "working" as const,
+        startedAt: now(),
+        activity: [],
+      }),
+      id: event.id,
+      description: event.description,
+      ...(event.agentType ? { agentType: event.agentType } : {}),
+      ...(event.lastToolName ? { lastToolName: event.lastToolName } : {}),
+      ...(event.summary ? { summary: event.summary } : {}),
+      totalTokens: Math.max(existing?.totalTokens ?? 0, event.totalTokens),
+    }));
+  }
+  if (event.type === "subagent.activity") {
+    return updateSubagent(state, threadId, event.id, (existing) => {
+      const base: Subagent = existing ?? {
+        id: event.id,
+        description: "Subagent",
+        status: "working",
+        startedAt: now(),
+        activity: [],
+      };
+      if (base.activity.some((item) => item.id === event.activityId)) return base;
+      return {
+        ...base,
+        activity: [...base.activity, {
+          id: event.activityId,
+          kind: event.kind,
+          ...(event.title ? { title: event.title } : {}),
+          text: event.text,
+          at: now(),
+        }],
+      };
+    });
+  }
+  return updateSubagent(state, threadId, event.id, (existing) => {
+    const { stopping: _stopping, ...base } = existing ?? { id: event.id, description: "Subagent", startedAt: now(), activity: [] };
+    return { ...base, status: event.status, summary: event.summary || existing?.summary, finishedAt: now() };
+  });
+}
+
+/** What the agent process reports about work that outlives the run that started it. */
+export function applyThreadEvent<T extends RunFeedsState>(state: T, event: ThreadEvent): T {
+  switch (event.type) {
+    case "resource.stopped": return state;
+    case "subagent.started":
+    case "subagent.metadata":
+    case "subagent.status":
+    case "subagent.progress":
+    case "subagent.activity":
+    case "subagent.finished":
+      return applySubagentReport(state, event.taskId, event);
+    case "background.changed":
+      return applyBackgroundEvent(state, event);
+    case "goal.changed": {
+      const goals = { ...state.goals };
+      if (event.goal) goals[event.taskId] = event.goal;
+      else delete goals[event.taskId];
+      return { ...state, goals };
+    }
+    default:
+      return applyWorkflowEvent(state, event);
+  }
+}
+
+/**
+ * What the thread's session has running in the background, kept by the thread: a shell or a monitor
+ * outlives the run that started it. A stop already asked for stays marked until the process is gone.
+ */
+function applyBackgroundEvent<T extends RunFeedsState>(state: T, event: BackgroundEvent): T {
+  const stopping = new Set((state.backgroundProcesses[event.taskId] ?? []).filter((process) => process.stopping).map((process) => process.id));
+  return withBackgroundProcesses(state, event.taskId, event.processes.map((process) => stopping.has(process.id) ? { ...process, stopping: true } : process));
+}
+
+/** What a workflow reports, kept by its thread: the run that started it may be long over. */
+function applyWorkflowEvent<T extends RunFeedsState>(state: T, event: WorkflowEvent): T {
+  if (event.type === "workflow.started") {
+    return updateWorkflow(state, event.taskId, event.id, (existing) => ({
+      ...(existing ?? { phases: [], agents: [], totalTokens: 0, totalToolCalls: 0, startedAt: now() }),
+      id: event.id,
+      name: event.name,
+      description: event.description,
+      status: "running",
+    }));
+  }
+  if (event.type === "workflow.progress") {
+    return updateWorkflow(state, event.taskId, event.id, (existing) => ({
+      ...(existing ?? { id: event.id, name: event.id, description: "Dynamic workflow", status: "running" as const, startedAt: now() }),
+      phases: event.phases,
+      agents: event.agents,
+      totalTokens: event.totalTokens,
+      totalToolCalls: event.totalToolCalls,
+    }));
+  }
+  return updateWorkflow(state, event.taskId, event.id, (existing) => ({
+    ...(existing ?? { id: event.id, name: event.id, description: "Dynamic workflow", phases: [], agents: [], totalTokens: 0, totalToolCalls: 0, startedAt: now() }),
+    status: event.status,
+    finishedAt: now(),
+    stopping: false,
+    ...(event.summary ? { summary: event.summary } : {}),
+  }));
+}
+
+/**
+ * A thread's turn ending, however it ends: it reads as stopped or idle, its run is closed, and it keeps how and when it ended.
+ * Text the run ended on is its answer.
+ */
+export function withTurnEnded<T extends RunTransitionState>(state: T, taskId: string, status: Extract<RunEvent, { type: "run.status" }>["status"]): T {
+  return updateThread(withRunStatus(state, taskId, turnEndStatus(status)), taskId, (thread) => endedTurn(thread, status));
+}
+
+/** How a thread reads once its turn ended with `status`. */
+export function turnEndStatus(status: Extract<RunEvent, { type: "run.status" }>["status"]): ThreadRunStatus {
+  return status === "cancelled" ? "stopped" : "idle";
+}
+
+/** The thread a turn ending with `status` leaves: no run open, and how and when it ended. */
+export function endedTurn({ runOpen: _closed, ...thread }: Thread, status: Extract<RunEvent, { type: "run.status" }>["status"]): Thread {
+  const ended = runOutcome(status);
+  const last = thread.messages.at(-1);
+  const answered = last?.kind === "assistant" && !last.artifact && !last.answer;
+  const at = now();
+  return { ...thread, ...(answered ? { messages: replaceLastMessage(thread.messages, { ...last, answer: true }) } : {}), runEndedAt: at, rankedAt: at, ...(ended ? { runEndedAs: ended } : {}) };
+}
+
+/** Compaction updates the transcript, but it does not replace how the last thread run ended, its verdict, nor its report. */
+export function restoredTestimony({ outcome: _outcome, outcomeUnread: _unread, runEndedAt: _ended, runEndedAs: _endedAs, ...thread }: Thread, before: ThreadMark): Thread {
+  return {
+    ...thread,
+    ...(before.rankedAt === undefined ? {} : { rankedAt: before.rankedAt }),
+    ...(before.runEndedAs === undefined ? {} : { runEndedAs: before.runEndedAs }),
+    ...(before.outcome === undefined ? {} : { outcome: before.outcome }),
+    ...(before.outcomeUnread ? { outcomeUnread: true as const } : {}),
+    ...(before.runEndedAt === undefined ? {} : { runEndedAt: before.runEndedAt }),
+    ...(before.report ? { report: before.report } : {}),
+  };
+}
+
+/** A run reaching its end: the run record goes, and what it left behind is settled on its thread. */
+function applyRunFinished<T extends RunTransitionState>(state: T, event: Extract<RunEvent, { type: "run.status" }>): T {
+  /** What the run left running is the session's, which outlives it, so only the session can end it. */
+  let next = withTurnEnded(withActiveRun(withStreamingTail(state, event.taskId, null), event.taskId, null), event.taskId, event.status);
+  const { [event.runId]: _expired, ...approvals } = next.approvals;
+  next = { ...next, approvals } as T;
+  const subagents = next.subagents[event.taskId];
+  if (subagents?.some((subagent) => subagent.status === "working" && !subagent.sessionScoped)) {
+    const status = event.status === "succeeded" ? "completed" : event.status === "failed" ? "failed" : "stopped";
+    next = withSubagents(next, event.taskId, subagents.map((subagent) => subagent.status === "working" && !subagent.sessionScoped
+      ? { ...subagent, status, finishedAt: now() }
+      : subagent));
+  }
+  /** A run cut short took its workflows with it; a run that answered leaves them running in the background. */
+  const workflows = next.workflows[event.taskId];
+  if (event.status !== "succeeded" && workflows?.some((workflow) => workflow.status === "running")) {
+    next = withWorkflows(next, event.taskId, workflows.map((workflow) => workflow.status === "running"
+      ? { ...workflow, status: "stopped" as const, finishedAt: now(), stopping: false }
+      : workflow));
+  }
+  if (event.status === "failed" && event.message) next = updateThread(next, event.taskId, (thread) => ({ ...thread, messages: appendMessages(thread.messages, [createFailureMessage(event.message!)]), updatedAt: now() }));
+  return next;
+}
+
+/**
+ * The message a block of a streamed answer belongs to. Once another message lands after the answer,
+ * its next block starts a new part with its own ID.
+ */
+function answerPart(run: ActiveRun, last: Thread["messages"][number] | undefined, messageId: string) {
+  const parts = run.answerParts?.[messageId];
+  if (parts === undefined) return { id: messageId, parts: 0 };
+  const id = parts ? `${messageId}:${parts}` : messageId;
+  return last?.id === id ? { id, parts } : { id: `${messageId}:${parts + 1}`, parts: parts + 1 };
+}
+
+/** The message the latest block of a streamed answer landed on. */
+export function answerPartId(run: ActiveRun | undefined, messageId: string) {
+  const parts = run?.answerParts?.[messageId];
+  return parts ? `${messageId}:${parts}` : messageId;
+}
+
+/** A run that hears anything from its engine other than another retry notice is through the retry. */
+function throughRetry<T extends RunTransitionState>(state: T, run: ActiveRun, event: RunEvent): T {
+  if (run.status !== "retrying" || event.type === "run.retrying" || event.type === "queued.delivered" || event.type === "queued.steer-failed" || event.type === "context.spent") return state;
+  return withRunPhase(state, run.taskId, { status: "running" });
+}
+
+export function applyRunEvent<T extends RunTransitionState>(state: T, event: RunEvent): T {
+  const found = state.activeRuns[event.taskId];
+  if (!found || event.runId !== found.runId || event.sequence <= found.sequence) return state;
+  const through = throughRetry(state, found, event);
+  const withSequence = withActiveRun(through, event.taskId, { ...through.activeRuns[event.taskId]!, sequence: event.sequence });
+  const active = withSequence.activeRuns[event.taskId]!;
+
+  if (event.type === "run.retrying") {
+    const retry: RetryNotice = { message: event.message, ...(event.attempt === undefined ? {} : { attempt: event.attempt }), ...(event.maxRetries === undefined ? {} : { maxRetries: event.maxRetries }) };
+    return withRunPhase(withSequence, event.taskId, { status: "retrying", retry });
+  }
+
+  if (event.type === "run.started") {
+    /** A workflow the last run left running is still going; the ones that ended are that run's history. */
+    const carried = (state.workflows[event.taskId] ?? []).filter((workflow) => workflow.status === "running");
+    return withWorkflows(withStreamingTail(withSequence, event.taskId, null), event.taskId, carried);
+  }
+  if (event.type === "run.status") {
+    /** The run says running only once no approval is left waiting, so the one shown has been answered. */
+    if (event.status === "running") return withApprovalAnswered(withSequence, event.taskId);
+    if (event.status === "awaiting-approval") return withRunPhase(withSequence, event.taskId, { status: event.status });
+    return applyRunFinished(withSequence, event);
+  }
+  if (event.type === "question.requested") {
+    const questions = event.request.questions.map((question) => ({ ...question, runId: event.runId, requestId: event.requestId, questionId: question.id, blocking: event.request.blocking }));
+    const next = withActiveRun(withSequence, event.taskId, { ...withSequence.activeRuns[event.taskId], questions: [...(active.questions ?? []), ...questions] });
+    const messages = questions.map((question) => {
+      let text = question.question;
+      if (question.options.length) {
+        const options = question.options.map((option) => option.description ? `- ${option.label}: ${option.description}` : `- ${option.label}`);
+        text += "\n\n" + options.join("\n");
+      }
+      return createConversationMessage("assistant", text);
+    });
+    return updateThread(next, event.taskId, (thread) => ({ ...thread, messages: [...thread.messages, ...messages], updatedAt: now() }));
+  }
+  if (event.type === "question.answered" || event.type === "question.closed") {
+    const questions = (active.questions ?? []).filter((question) => question.requestId !== event.requestId || (event.type === "question.answered" && question.questionId !== event.questionId));
+    const next = withActiveRun(withSequence, event.taskId, { ...withSequence.activeRuns[event.taskId], questions });
+    if (event.type === "question.closed") return next;
+    return updateThread(next, event.taskId, (thread) => ({ ...thread, messages: [...thread.messages, createConversationMessage("user", event.text)], updatedAt: now() }));
+  }
+  if (event.type === "assistant.tail") {
+    if (!event.text) return withStreamingTail(withSequence, event.taskId, null);
+    const last = withSequence.threads.find((thread) => thread.id === event.taskId)?.messages.at(-1);
+    return withStreamingTail(withSequence, event.taskId, { messageId: answerPart(active, last, event.messageId).id, text: event.text });
+  }
+  if (event.type === "assistant.delta") {
+    const last = withSequence.threads.find((thread) => thread.id === event.taskId)?.messages.at(-1);
+    const part = event.artifact ? { id: event.messageId, parts: 0 } : answerPart(active, last, event.messageId);
+    const tracked = event.artifact || active.answerParts?.[event.messageId] === part.parts
+      ? withSequence
+      : withActiveRun(withSequence, event.taskId, { ...active, sequence: event.sequence, answerParts: { ...active.answerParts, [event.messageId]: part.parts } });
+    /** The block being committed is what the tail was showing, so it stops standing in for it. */
+    return updateThread(event.artifact ? tracked : withStreamingTail(tracked, event.taskId, null), event.taskId, (thread) => {
+      let messages;
+      if (last?.kind === "assistant" && last.id === part.id) {
+        messages = replaceLastMessage(thread.messages, { ...last, text: `${last.text}${event.append ? "" : "\n"}${event.text}` });
+      } else {
+        const message = { id: part.id, kind: "assistant" as const, text: event.text, ...(event.artifact ? { artifact: true as const } : {}), at: now() };
+        // Image persistence can finish during a streamed answer. Keep that answer at the tail so
+        // its next block still appends to the same message, with the image beside it.
+        messages = event.artifact && last?.kind === "assistant" && !last.artifact
+          ? [...thread.messages.slice(0, -1), message, last]
+          : appendMessages(thread.messages, [message]);
+      }
+      return { ...thread, messages, updatedAt: now() };
+    });
+  }
+  if (event.type === "context.usage") {
+    const { warming: _warmed, ...warm } = withSequence.activeRuns[event.taskId]!;
+    const settledRun = active.warming ? withActiveRun(withSequence, event.taskId, warm) : withSequence;
+    const current = withSequence.threads.find((thread) => thread.id === event.taskId)?.contextUsage;
+    if (current?.tokens === event.tokens && current.limit === event.limit && current.model === event.model) return settledRun;
+    return updateThread(settledRun, event.taskId, (thread) => ({
+      ...thread,
+      contextUsage: { tokens: event.tokens, limit: event.limit, model: event.model },
+    }));
+  }
+  if (event.type === "context.spent") {
+    /** Spend is counted beside the conversation, not in it: it moves neither the messages nor when the thread last changed. */
+    return updateThread(withSequence, event.taskId, (thread) => {
+      /** A thread that names no model on an engine with no built-in default has nothing to count it under. */
+      const model = thread.model ?? defaultModelFor(thread.engine);
+      if (model === undefined) return thread;
+      return { ...thread, usage: { ...thread.usage, [model]: Math.min(Number.MAX_SAFE_INTEGER, (thread.usage?.[model] ?? 0) + event.tokens) } };
+    });
+  }
+  if (event.type === "context.compaction-status") {
+    const activeState = withRunPhase(withSequence, event.taskId, { status: event.compacting ? "compacting" : "running" });
+    return event.error
+      ? updateThread(activeState, event.taskId, (thread) => ({ ...thread, messages: appendMessages(thread.messages, [createFailureMessage(event.error!)]), updatedAt: now() }))
+      : activeState;
+  }
+  if (event.type === "context.compacted") {
+    const activeState = withRunPhase(withSequence, event.taskId, { status: "running" });
+    /** A summary may have dropped what the coordinator read of its memory, so its next run reads it again. */
+    return updateThread(activeState, event.taskId, (thread) => ({
+      ...withMemoryUnheard(thread),
+      messages: appendMessages(thread.messages, [createConversationMessage(
+        "system",
+        event.postTokens === undefined
+          ? `Context ${event.trigger}-compacted at ${event.preTokens.toLocaleString("en-US")} tokens.`
+          : `Context ${event.trigger}-compacted: ${event.preTokens.toLocaleString("en-US")} → ${event.postTokens.toLocaleString("en-US")} tokens.`,
+      )]),
+      ...(thread.contextUsage && event.postTokens !== undefined
+        ? { contextUsage: { ...thread.contextUsage, tokens: event.postTokens } }
+        : {}),
+      updatedAt: now(),
+    }));
+  }
+  if (event.type === "tool.intent") {
+    return updateThread(withSequence, event.taskId, (thread) => ({
+      ...thread,
+      messages: appendMessages(thread.messages, [createConversationMessage("tool", event.intent.name, JSON.stringify(event.intent.input, null, 2))]),
+      updatedAt: now(),
+    }));
+  }
+  if (event.type === "approval.requested") {
+    const input = event.intent.input && typeof event.intent.input === "object" && !Array.isArray(event.intent.input)
+      ? event.intent.input as Record<string, unknown>
+      : { value: event.intent.input };
+    const approval: ApprovalView = {
+      approvalId: event.approvalId,
+      taskId: event.taskId,
+      runId: event.runId,
+      title: event.title,
+      description: event.description,
+      toolName: event.intent.name,
+      input,
+    };
+    return { ...withSequence, approvals: { ...withSequence.approvals, [event.runId]: approval } } as T;
+  }
+  if (event.type === "continuation.updated") {
+    /** A session of the thread's own ends any inheritance: a copy forks what it was given until then. */
+    return updateThread(withSequence, event.taskId, ({ inheritedContinuation: _spent, ...thread }) => ({ ...thread, continuation: event.continuation, continuationStatus: "available", updatedAt: now() }));
+  }
+  if (event.type === "continuation.lost") {
+    return updateThread(withSequence, event.taskId, ({ continuation: _lost, ...thread }) => ({ ...thread, continuationStatus: "invalid", updatedAt: now() }));
+  }
+  return withSequence;
+}

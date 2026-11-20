@@ -1,0 +1,231 @@
+import { LuChevronLeft as ChevronLeft, LuGitBranch as GitBranch, LuGitCommitHorizontal as GitCommit, LuListChecks as ListChecks, LuMessageSquareText as MessageSquareText, LuX as X } from "react-icons/lu";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
+import type { ReviewPicker as ReviewPickerState } from "../../application/workspace-state";
+import type { ReviewTarget } from "../../domain/review";
+import type { BranchesResult } from "../../contracts/ipc";
+import { moveListFocus, useDismissibleLayer } from "../focus";
+import { matchBranches } from "./BranchMenu";
+import { useBranches } from "../use-branches";
+import { shortcutTip } from "./TooltipLayer";
+import { Button, IconButton } from "../ui/Button";
+import { SearchField, TextField } from "../ui/Field";
+import { Chip } from "../ui/Chip";
+import "../ui/glass.css";
+
+type ReviewPickerProps = {
+  picker: ReviewPickerState;
+  workspaceId?: string;
+  /** What the engine that reviews is called, for wording that speaks of it. */
+  engineLabel: string;
+  returnFocus: RefObject<HTMLTextAreaElement | null>;
+  onStep: (step: ReviewPickerState["step"]) => void;
+  onReview: (target: ReviewTarget) => void;
+  onClose: () => void;
+};
+
+function targets(engineLabel: string) {
+  return [
+    { step: "base" as const, label: "Review against a base branch", description: "Compare this branch with another branch.", icon: GitBranch },
+    { target: { type: "uncommittedChanges" } as const, label: "Review uncommitted changes", description: "Review staged, unstaged, and untracked changes.", icon: ListChecks },
+    { step: "commit" as const, label: "Review a commit", description: "Review the changes introduced by one commit.", icon: GitCommit },
+    { step: "custom" as const, label: "Custom review instructions", description: `Tell ${engineLabel} what to inspect.`, icon: MessageSquareText },
+  ];
+}
+
+function Heading({ step, current, onBack, onClose }: { step: ReviewPickerState["step"]; current?: string | null; onBack: () => void; onClose: () => void }) {
+  const title = step === "base" && current
+    ? <>Compare <code>{current}</code> with…</>
+    : { targets: "Choose a review", base: "Choose a base branch", commit: "Review a commit", custom: "Custom review" }[step];
+  return (
+    <div className="command-menu-heading review-heading">
+      {step === "targets"
+        ? <ListChecks size={14} aria-hidden="true" />
+        : <IconButton className="review-back" label="Back to review options" tip={shortcutTip("Back", "Escape")} onClick={onBack}><ChevronLeft size={16} /></IconButton>}
+      <span>{title}</span>
+      <IconButton className="review-close" label="Close review picker" tip={step === "targets" ? shortcutTip("Close", "Escape") : "Close"} onClick={onClose}><X size={16} /></IconButton>
+    </div>
+  );
+}
+
+function TargetOptions({ engineLabel, onStep, onReview }: Pick<ReviewPickerProps, "engineLabel" | "onStep" | "onReview">) {
+  const [focused, setFocused] = useState(0);
+  return (
+    <div className="command-menu-list review-targets" role="listbox" aria-label="Review options" onKeyDown={moveListFocus}>
+      {targets(engineLabel).map((option, index) => {
+        const Icon = option.icon;
+        return (
+          <button
+            autoFocus={index === 0}
+            type="button"
+            className="command-option review-option"
+            role="option"
+            aria-selected={index === focused}
+            key={option.label}
+            onFocus={() => setFocused(index)}
+            onMouseEnter={(event) => event.currentTarget.focus()}
+            onClick={() => option.target ? onReview(option.target) : onStep(option.step)}
+          >
+            <span className="raised command-mark app" aria-hidden="true"><Icon size={16} /></span>
+            <span className="command-copy"><strong>{option.label}</strong><small>{option.description}</small></span>
+            <Chip variant="tag" className="command-source">{engineLabel}</Chip>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The search field keeps focus; arrow keys move the highlighted branch, which Enter takes. */
+function BaseBranchPicker({ branches, onReview }: Pick<ReviewPickerProps, "onReview"> & { branches: BranchesResult | null }) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const listId = useId();
+  const list = useRef<HTMLDivElement>(null);
+  const available = branches?.status === "available" ? branches : null;
+  const names = useMemo(() => {
+    const candidates = [...new Set([...(available?.branches ?? []), ...(available?.remotes ?? [])])]
+      .filter((branch) => branch !== available?.current);
+    return matchBranches(candidates, query);
+  }, [available, query]);
+  const chosen = names.length ? Math.min(active, names.length - 1) : -1;
+  useEffect(() => {
+    list.current?.children[chosen]?.scrollIntoView?.({ block: "nearest" });
+  }, [chosen]);
+  return (
+    <div className="review-branch-stage">
+      <SearchField
+        wrapClassName="review-search"
+        variant="menu"
+        label="Search base branches"
+        type="text"
+        autoFocus
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={names.length > 0}
+        aria-controls={listId}
+        aria-activedescendant={chosen < 0 ? undefined : `${listId}-${chosen}`}
+        placeholder="Search branches"
+        spellCheck={false}
+        value={query}
+        onChange={(event) => { setQuery(event.target.value); setActive(0); }}
+        onKeyDown={(event) => {
+          if ((event.key === "ArrowDown" || event.key === "ArrowUp") && names.length) {
+            event.preventDefault();
+            setActive((chosen + (event.key === "ArrowDown" ? 1 : names.length - 1)) % names.length);
+          } else if (event.key === "Enter" && chosen >= 0) {
+            event.preventDefault();
+            onReview({ type: "baseBranch", branch: names[chosen]! });
+          }
+        }}
+      />
+      <div ref={list} id={listId} className="review-branch-list" role="listbox" aria-label="Base branches">
+        {names.map((branch, index) => (
+          <button
+            type="button"
+            role="option"
+            id={`${listId}-${index}`}
+            className={index === chosen ? "active" : undefined}
+            aria-selected={index === chosen}
+            tabIndex={-1}
+            key={branch}
+            onMouseEnter={() => setActive(index)}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onReview({ type: "baseBranch", branch })}
+          >
+            <GitBranch size={14} aria-hidden="true" /><code>{branch}</code>
+          </button>
+        ))}
+        {!branches && <p className="command-empty">Reading branches…</p>}
+        {branches?.status === "error" && <p className="review-error" role="alert">{branches.message}</p>}
+        {available && names.length === 0 && <p className="command-empty">{query.trim() ? "No branch matches" : "No other branch to compare with"}</p>}
+      </div>
+    </div>
+  );
+}
+
+/** Up to a SHA-256 object name; fewer than four characters is still being typed. */
+const COMMIT_SHA = /^[0-9a-f]{4,64}$/i;
+
+type Draft = { value: string; onChange: (value: string) => void };
+
+/** Puts the caret after a draft returned to, so typing carries on from where it stopped. */
+function caretAtEnd(field: HTMLInputElement | HTMLTextAreaElement | null) {
+  if (!field) return;
+  field.focus();
+  field.setSelectionRange(field.value.length, field.value.length);
+}
+
+function CommitPicker({ onReview, value: sha, onChange: setSha }: Pick<ReviewPickerProps, "onReview"> & Draft) {
+  const commit = sha.trim();
+  const valid = COMMIT_SHA.test(commit);
+  const invalid = !valid && (/[^0-9a-f]/i.test(commit) || commit.length > 64);
+  const short = !valid && !invalid && commit.length > 0;
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (valid) onReview({ type: "commit", sha: commit, title: null });
+  }
+  return (
+    <form className="review-form" onSubmit={submit}>
+      <TextField
+        label="Commit SHA"
+        mono
+        ref={caretAtEnd}
+        spellCheck={false}
+        placeholder="e.g. a1b2c3d"
+        value={sha}
+        hint={short ? "At least 4 characters" : undefined}
+        error={invalid ? <span className="review-form-error" role="alert">Enter a hex commit SHA</span> : undefined}
+        onChange={(event) => setSha(event.target.value)}
+      />
+      <div className="review-form-actions"><Button type="submit" variant="primary" disabled={!valid}>Start review</Button></div>
+    </form>
+  );
+}
+
+function CustomPicker({ engineLabel, onReview, value: instructions, onChange: setInstructions }: Pick<ReviewPickerProps, "engineLabel" | "onReview"> & Draft) {
+  const custom = instructions.trim();
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (custom) onReview({ type: "custom", instructions: custom });
+  }
+  return (
+    <form className="review-form" onSubmit={submit}>
+      <TextField
+        multiline
+        label="Review instructions"
+        ref={caretAtEnd}
+        rows={4}
+        placeholder={`What should ${engineLabel} focus on?`}
+        value={instructions}
+        onChange={(event) => setInstructions(event.target.value)}
+        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) submit(event); }}
+      />
+      <div className="review-form-actions"><Button type="submit" variant="primary" disabled={!custom}>Start review</Button></div>
+    </form>
+  );
+}
+
+/** The engine's review preset picker, kept in the composer instead of opening a separate settings dialog. */
+export function ReviewPicker({ picker, workspaceId, engineLabel, returnFocus, onStep, onReview, onClose }: ReviewPickerProps) {
+  const root = useRef<HTMLDivElement>(null);
+  const branches = useBranches(workspaceId, picker.step === "base");
+  /** What was typed into a step outlives stepping back, until the picker closes. */
+  const [sha, setSha] = useState("");
+  const [instructions, setInstructions] = useState("");
+  useDismissibleLayer(true, [root], onClose, returnFocus);
+  function keyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    if (picker.step === "targets") onClose();
+    else onStep("targets");
+  }
+  return (
+    <div ref={root} id="review-picker" className="glass-popover command-menu review-menu" role="dialog" aria-label="Start code review" onKeyDown={keyDown}>
+      <Heading step={picker.step} current={branches?.status === "available" ? branches.current : null} onBack={() => onStep("targets")} onClose={onClose} />
+      {picker.step === "targets" && <TargetOptions engineLabel={engineLabel} onStep={onStep} onReview={onReview} />}
+      {picker.step === "base" && <BaseBranchPicker branches={branches} onReview={onReview} />}
+      {picker.step === "commit" && <CommitPicker onReview={onReview} value={sha} onChange={setSha} />}
+      {picker.step === "custom" && <CustomPicker engineLabel={engineLabel} onReview={onReview} value={instructions} onChange={setInstructions} />}
+    </div>
+  );
+}

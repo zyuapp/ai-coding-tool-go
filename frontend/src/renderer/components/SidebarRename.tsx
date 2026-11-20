@@ -1,0 +1,75 @@
+import { useRef, useState } from "react";
+import { useDismissibleLayer } from "../focus";
+
+/** Which row of a list is being renamed, the input over it, and the row focus goes back to. */
+export function useRenaming(onCommit: (id: string, value: string) => void) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const row = useRef<HTMLElement>(null);
+  useDismissibleLayer(editing !== null, [input], () => input.current?.blur(), row);
+  return {
+    editing,
+    input,
+    row,
+    start: (id: string, element?: HTMLElement | null) => {
+      if (element) row.current = element;
+      setEditing(id);
+    },
+    cancel: () => setEditing(null),
+    commit: (id: string, value: string) => {
+      setEditing(null);
+      onCommit(id, value);
+    },
+  };
+}
+
+export type Renaming = ReturnType<typeof useRenaming>;
+
+/**
+ * A name being typed in place, over the row it belongs to, selected whole so typing replaces it.
+ * Enter and blur keep what was typed and Escape leaves it, so both lists rename the same way. A
+ * required name refuses Enter on a blank field, marking it until something is typed, and a blank
+ * field left behind keeps the old name.
+ */
+export function RenameInput({ inputRef, className, label, value, placeholder, required = false, onCommit, onCancel }: {
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  className: string;
+  label: string;
+  value: string;
+  placeholder?: string;
+  required?: boolean;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [blank, setBlank] = useState(false);
+  return (
+    <input
+      ref={inputRef}
+      className={blank ? `${className} invalid` : className}
+      aria-label={label}
+      aria-invalid={blank || undefined}
+      autoFocus
+      defaultValue={value}
+      placeholder={placeholder}
+      onFocus={(event) => event.currentTarget.select()}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onInput={() => setBlank(false)}
+      /** The row answers Enter itself and dragging claims the arrow and space keys. */
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          if (required && !event.currentTarget.value.trim()) setBlank(true);
+          else onCommit(event.currentTarget.value);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          onCancel();
+        }
+      }}
+      onBlur={(event) => {
+        if (required && !event.currentTarget.value.trim()) onCancel();
+        else onCommit(event.currentTarget.value);
+      }}
+    />
+  );
+}

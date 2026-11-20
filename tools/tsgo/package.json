@@ -1,0 +1,9 @@
+{
+  "name": "tsgo",
+  "private": true,
+  "type": "module",
+  "description": "Reads the TypeScript layers and describes their exported types for the Go generator.",
+  "dependencies": {
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,309 @@
+import { LuAlarmClock as AlarmClock, LuChevronDown as ChevronDown, LuChevronRight as ChevronRight, LuFileDiff as FileDiff, LuGitBranch as GitBranch, LuGitMerge as GitMerge, LuGitPullRequest as GitPullRequest, LuGitPullRequestClosed as GitPullRequestClosed, LuGitPullRequestDraft as GitPullRequestDraft } from "react-icons/lu";
+import { useRef, type ReactNode } from "react";
+import type { ChangedFilesResult } from "../../contracts/ipc";
+import { orderSubagents, type BackgroundProcess, type Subagent, type SubagentGroup, type SubagentGroups } from "../../domain/run";
+import type { PullRequestAnswer, PullRequestRef, PullRequestState } from "../../domain/pull-request";
+import type { Workflow } from "../../domain/workflow";
+import { BackgroundProcessSection } from "./BackgroundProcessList";
+import { BranchMenu } from "./BranchMenu";
+import { useBranches } from "../use-branches";
+import { useMessageLinks, WebLink } from "./MarkdownMessage";
+import { useDismissibleLayer } from "../focus";
+import { SubagentRow } from "./SubagentList";
+import type { MemberPullRequest } from "../../application/pull-request-view";
+import { Button } from "../ui/Button";
+import { ListHeading } from "../ui/List";
+import "../ui/glass.css";
+
+export type SessionPanelProps = {
+  environment: ChangedFilesResult | null;
+  hasProject: boolean;
+  /** The checkout the thread works in, which is the one the branch menu reads and moves. */
+  workspaceId?: string;
+  /** The pull request the checkout's work belongs to, drawn only when there is one to draw. */
+  pullRequest: PullRequestAnswer;
+  /** Absent until a thread exists; a draft has nowhere to move yet. */
+  locationRow?: ReactNode;
+  openMenu: string | null;
+  subagents: Subagent[];
+  /** Which subagent groups are unfolded; this panel reads only its own list. */
+  subagentGroups: SubagentGroups;
+  backgroundProcesses: BackgroundProcess[];
+  workflows: Workflow[];
+  automationCount: number;
+  onSelect: (id: string) => void;
+  onOpenAgents: () => void;
+  onOpenAutomations: () => void;
+  /** Opens the review, or closes it when it is already the tab in front. */
+  onToggleChanges: () => void;
+  onOpenWorkflow: (id: string) => void;
+  onStopProcess: (processId: string) => void;
+  onSetOpenMenu: (menu: string | null) => void;
+  onSetSubagentGroup: (group: SubagentGroup, open: boolean) => void;
+  /** `create` names a branch the repository does not have yet, made at the checkout's HEAD first. */
+  onCheckoutBranch: (branch: string, create: boolean) => void;
+  /** A coordinator's sections: the checkouts and pull requests of the threads under it. */
+  children?: ReactNode;
+};
+
+export const BRANCH_MENU = "session:branch";
+
+/** The sidebar carries the few that want reading; the whole roster lives in the Subagents panel. */
+const SIDEBAR_LIMIT = 6;
+
+const NO_CHECKOUT = "Reopen the project to inspect Git";
+
+function environmentMessage(environment: ChangedFilesResult | null, workspaceId: string | undefined) {
+  if (!workspaceId) return NO_CHECKOUT;
+  /** A checkout with no answer yet is one still being read; the rows fill in when it answers. */
+  if (!environment) return "Reading Git…";
+  if (environment.status === "error") return environment.message;
+  if (environment.status === "unknown") return "Workspace is no longer registered";
+  if (environment.status === "unavailable") return `Workspace is ${environment.reason}`;
+  return null;
+}
+
+type BranchRowProps = Pick<SessionPanelProps, "workspaceId" | "openMenu" | "onSetOpenMenu" | "onCheckoutBranch"> & { branch: string | null };
+
+/** The branch the checkout is on, and the list that moves it onto another. */
+function BranchRow({ branch, workspaceId, openMenu, onSetOpenMenu, onCheckoutBranch }: BranchRowProps) {
+  const open = openMenu === BRANCH_MENU;
+  const row = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useDismissibleLayer(open, [row, menu], () => onSetOpenMenu(null), trigger);
+  /** Branches are only worth reading while the list is up; the row itself says where Git already is. */
+  const branches = useBranches(workspaceId, open);
+
+  return (
+    <div ref={row} className={`session-branch ${open ? "open" : ""}`.trimEnd()} data-popover-menu>
+      <button
+        ref={trigger}
+        className="session-row session-row-action"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-disabled={!workspaceId || undefined}
+        data-tip={workspaceId ? undefined : NO_CHECKOUT}
+        onClick={workspaceId ? () => onSetOpenMenu(open ? null : BRANCH_MENU) : undefined}
+      >
+        <span className="session-row-icon"><GitBranch size={18} /></span>
+        <span>Branch</span>
+        <ChevronDown size={12} />
+        <code title={branch ?? undefined}>{branch ?? "—"}</code>
+      </button>
+      {open && (
+        <BranchMenu
+          menuRef={menu}
+          anchor={row.current}
+          branches={branches}
+          selected={branch}
+          onPick={(name, create) => {
+            onSetOpenMenu(null);
+            onCheckoutBranch(name, create);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Which icon says the state, so the row is not read by its colour alone. */
+export const PULL_REQUEST_ICONS: Record<PullRequestState, typeof GitPullRequest> = {
+  draft: GitPullRequestDraft,
+  open: GitPullRequest,
+  merged: GitMerge,
+  closed: GitPullRequestClosed,
+};
+
+export const GITHUB_CLI_URL = "https://cli.github.com";
+
+/** Drawn only when there is a pull request: a row saying there is none would be worth less than the space. */
+function PullRequestRow({ pullRequest }: { pullRequest: PullRequestRef }) {
+  const links = useMessageLinks();
+  const Icon = PULL_REQUEST_ICONS[pullRequest.state];
+
+  return (
+    <WebLink
+      className="session-row session-row-action session-pull-request"
+      href={pullRequest.url}
+      title={`#${pullRequest.number} ${pullRequest.title}`}
+      openInApp={links.openUrlInApp && (() => links.openUrlInApp!(pullRequest.url))}
+    >
+      <span className="session-row-icon" data-state={pullRequest.state}><Icon size={18} /></span>
+      <span>Pull request</span>
+      <code>#{pullRequest.number}</code>
+    </WebLink>
+  );
+}
+
+/**
+ * Drawn when the checkout lives on GitHub but `gh` is not installed, so a row that never appears
+ * reads as something to install rather than as a checkout with no pull request.
+ */
+function InstallGitHubCliRow() {
+  const links = useMessageLinks();
+
+  return (
+    <WebLink
+      className="session-row session-row-action session-pull-request"
+      href={GITHUB_CLI_URL}
+      title="Pull requests are read with the GitHub CLI, which is not installed"
+      openInApp={links.openUrlInApp && (() => links.openUrlInApp!(GITHUB_CLI_URL))}
+    >
+      <span className="session-row-icon session-row-icon-quiet"><GitPullRequest size={18} /></span>
+      <span>Install gh for pull requests</span>
+    </WebLink>
+  );
+}
+
+type SessionEnvironmentProps = Pick<SessionPanelProps,
+  "environment" | "hasProject" | "workspaceId" | "pullRequest" | "locationRow" | "openMenu" | "automationCount"
+  | "onOpenAutomations" | "onToggleChanges" | "onSetOpenMenu" | "onCheckoutBranch"
+>;
+
+type CheckoutRowsProps = Omit<SessionEnvironmentProps, "hasProject" | "locationRow" | "automationCount" | "onOpenAutomations">;
+
+/** The checkout's changes, branch and pull request, which a thread with no folder has none of. */
+function CheckoutRows({ environment, workspaceId, pullRequest, openMenu, onToggleChanges, onSetOpenMenu, onCheckoutBranch }: CheckoutRowsProps) {
+  const available = environment?.status === "available" ? environment : null;
+  const message = environmentMessage(environment, workspaceId);
+  return (
+    <>
+      <button
+        className="session-row session-row-action"
+        type="button"
+        onClick={onToggleChanges}
+      >
+        <span className="session-row-icon"><FileDiff size={18} /></span>
+        <span>Changes</span>
+        {available && (
+          <span className="change-counts" data-tip={available.baseline ? `Since ${available.baseline}` : "Uncommitted work"}>
+            <strong>+{available.additions}</strong><em>−{available.deletions}</em>
+          </span>
+        )}
+        <ChevronRight className="session-row-go" size={12} aria-hidden="true" />
+      </button>
+      <BranchRow
+        branch={available?.branch ?? null}
+        {...(workspaceId ? { workspaceId } : {})}
+        openMenu={openMenu}
+        onSetOpenMenu={onSetOpenMenu}
+        onCheckoutBranch={onCheckoutBranch}
+      />
+      {pullRequest.status === "found" && <PullRequestRow pullRequest={pullRequest.pullRequest} />}
+      {pullRequest.status === "gh-missing" && <InstallGitHubCliRow />}
+      {message && <p className="session-note">{message}</p>}
+    </>
+  );
+}
+
+/** A thread's checkout, the branch and pull request it is on, and the schedule that repeats it. */
+function SessionEnvironment({ hasProject, locationRow, automationCount, onOpenAutomations, ...checkout }: SessionEnvironmentProps) {
+  return (
+    <div className="session-environment">
+      {locationRow}
+      {hasProject && <CheckoutRows {...checkout} />}
+      <button className="session-row session-row-action" type="button" onClick={onOpenAutomations}>
+        <span className="session-row-icon"><AlarmClock size={18} /></span>
+        <span>Automations</span>
+        <span className="session-count">{automationCount}</span>
+        <ChevronRight className="session-row-go" size={12} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
+const PULL_REQUEST_STATES: Record<PullRequestState, string> = { draft: "Draft", open: "Open", merged: "Merged", closed: "Closed" };
+
+/**
+ * The pull requests a coordinator's threads have opened, each with the threads working on it. The row
+ * opens the pull request; each thread named under it opens that thread.
+ */
+export function MemberPullRequestList({ pullRequests, onSelect }: { pullRequests: MemberPullRequest[]; onSelect?: (threadId: string) => void }) {
+  const links = useMessageLinks();
+  return (
+    <section className="subagent-section coordination-section coordination-pull-requests" aria-label="Pull requests from these threads">
+      <ListHeading className="session-heading" label="Pull requests" />
+      <div className="subagent-list">
+        {pullRequests.map(({ pullRequest, threads }) => {
+          const Icon = PULL_REQUEST_ICONS[pullRequest.state];
+          return (
+            <div key={pullRequest.url} className="coordination-row coordination-pull-request">
+              <span className="coordination-row-mark" data-state={pullRequest.state}><Icon size={12} aria-hidden="true" /></span>
+              <span>
+                <WebLink
+                  className="coordination-pull-request-open"
+                  href={pullRequest.url}
+                  aria-label={`#${pullRequest.number} ${pullRequest.title}, ${PULL_REQUEST_STATES[pullRequest.state]}`}
+                  openInApp={links.openUrlInApp && (() => links.openUrlInApp!(pullRequest.url))}
+                >
+                  <strong data-tip={`#${pullRequest.number} ${pullRequest.title}`} data-tip-overflow>{pullRequest.title}</strong>
+                </WebLink>
+                <small>
+                  #{pullRequest.number} · {PULL_REQUEST_STATES[pullRequest.state]} ·{" "}
+                  {threads.map((thread, index) => (
+                    <span key={thread.id}>
+                      {index > 0 && ", "}
+                      {onSelect
+                        ? <button type="button" className="coordination-pull-request-thread" aria-label={`Open ${thread.title}`} onClick={() => onSelect(thread.id)}>{thread.title}</button>
+                        : thread.title}
+                    </span>
+                  ))}
+                </small>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+export function SessionPanel({ environment, hasProject, workspaceId, pullRequest, locationRow, openMenu, subagents, subagentGroups, backgroundProcesses, workflows, automationCount, onSelect, onOpenAgents, onOpenAutomations, onOpenWorkflow, onSetOpenMenu, onSetSubagentGroup, onCheckoutBranch, onStopProcess, onToggleChanges, children }: SessionPanelProps) {
+  const working = subagents.filter((subagent) => subagent.status === "working").length;
+  const shown = orderSubagents(subagents).slice(0, SIDEBAR_LIMIT);
+
+  return (
+    <aside className="session-panel" aria-label="Session panel">
+      <div className="session-card glass-pane">
+        <SessionEnvironment
+          environment={environment}
+          hasProject={hasProject}
+          {...(workspaceId ? { workspaceId } : {})}
+          pullRequest={pullRequest}
+          locationRow={locationRow}
+          openMenu={openMenu}
+          automationCount={automationCount}
+          onOpenAutomations={onOpenAutomations}
+          onToggleChanges={onToggleChanges}
+          onSetOpenMenu={onSetOpenMenu}
+          onCheckoutBranch={onCheckoutBranch}
+        />
+
+        {subagents.length > 0 && (
+          <div className="subagent-section">
+            <ListHeading
+              className="session-heading"
+              label="Subagents"
+              open={subagentGroups.sidebar}
+              onToggle={() => onSetSubagentGroup("sidebar", !subagentGroups.sidebar)}
+              action={working > 0 ? <span className="session-heading-note">{working} working</span> : undefined}
+            />
+            {subagentGroups.sidebar && (
+              <div className="subagent-list" aria-live="polite">
+                {shown.map((subagent) => <SubagentRow key={subagent.id} subagent={subagent} onSelect={onSelect} />)}
+                {subagents.length > shown.length && (
+                  <Button className="subagent-view-all" onClick={onOpenAgents}>View all {subagents.length}</Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <BackgroundProcessSection processes={backgroundProcesses} workflows={workflows} onOpenWorkflow={onOpenWorkflow} onStop={onStopProcess} />
+        {children}
+      </div>
+    </aside>
+  );
+}

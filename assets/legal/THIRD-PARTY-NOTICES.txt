@@ -1,0 +1,174 @@
+AI Coding Tool open source notices
+==================================
+
+This directory contains the license notices for AI Coding Tool and the CUA
+software redistributed with it. The CUA notices apply to version
+0.55.0 of the driver and SDK and version 0.31.0-3 of the
+UniFFI JavaScript runtime.
+
+AI Coding Tool
+--------------
+
+AI Coding Tool is licensed under the MIT License. See
+AI-CODING-TOOL-MIT.txt.
+
+Electron runtime
+----------------
+
+AI Coding Tool bundles Electron 45.2.3. Electron's MIT license is in
+ELECTRON-MIT.txt. Copyright and license notices for Chromium and the other
+third-party software in that Electron release are in
+ELECTRON-THIRD-PARTY-NOTICES.html. The separate notices for the embedded
+Mantle 1.0 and ReactiveObjC 3.1.0 macOS frameworks are in MANTLE-LICENSE.md and
+REACTIVEOBJC-MIT.md.
+
+Dictation helper
+----------------
+
+The aic-dictation helper bundled on macOS links FluidAudio and the other Swift
+packages it depends on. Their license and notice files are in
+DICTATION-SWIFT-DEPENDENCIES.txt.
+
+On Linux, dictation runs on ONNX Runtime, through the onnxruntime-node package
+under the MIT License. The notices for the third-party software compiled into
+its native library are in ONNXRUNTIME-THIRD-PARTY-NOTICES.txt.
+
+CUA Driver and SDK
+------------------
+
+The CUA-authored portions of the bundled cua-driver executable,
+@trycua/cua-driver JavaScript SDK, and CUA native SDK library are distributed
+under the MIT License. The compiled executable and SDK library also incorporate
+the separately licensed Rust components identified below and in
+CUA-RUST-DEPENDENCIES.html.
+
+Copyright (c) 2025 Cua AI, Inc.
+
+The complete copyright and permission notice is in CUA-MIT.txt.
+
+Version: 0.55.0
+Source tag: https://github.com/trycua/cua/tree/cua-driver-rs-v0.55.0
+Source commit: https://github.com/trycua/cua/tree/8f484f30586eef722bede7a5ce315de1148cca96
+Release: https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.55.0
+
+AI Coding Tool removes the x86_64 architecture slice from CUA's universal
+macOS executable, SDK library, and Node runtime for its arm64 distribution. It
+makes no source-code changes to those components.
+
+The licenses and copyright notices for Rust libraries linked into the bundled
+macOS arm64 executable are in CUA-RUST-DEPENDENCIES.html. That report was
+generated from the CUA 0.55.0 Cargo.lock file for the cua-driver package and
+the aarch64-apple-darwin target. Build-only and development-only dependencies
+are excluded.
+
+MPL-covered UniFFI components
+-----------------------------
+
+The following redistributed components are governed by the Mozilla Public
+License 2.0:
+
+* @trycua/cua-driver-darwin-arm64@0.55.0/cua_driver_node_runtime.node
+* @ubjs/core@0.31.0-3
+* @ubjs/node@0.31.0-3
+* The UniFFI 0.31.0 Rust components identified in
+  CUA-RUST-DEPENDENCIES.html
+
+The full license is in MPL-2.0.txt.
+
+The corresponding source for @ubjs/core, @ubjs/node, and the native N-API
+runtime is available at these exact version and commit references:
+
+https://github.com/jhugman/uniffi-bindgen-react-native/tree/0.31.0-3
+https://github.com/jhugman/uniffi-bindgen-react-native/tree/dcb5c4ab2350d57f6d26f5fa81a99c77ed86d449
+https://github.com/jhugman/uniffi-bindgen-react-native/tree/0.31.0-3/typescript
+https://github.com/jhugman/uniffi-bindgen-react-native/tree/0.31.0-3/runtimes/core
+https://github.com/jhugman/uniffi-bindgen-react-native/tree/0.31.0-3/runtimes/napi
+
+The licenses and copyright notices for the Rust and C libraries linked into
+the CUA Node runtime are in UBJS-NATIVE-DEPENDENCIES.html. The report was
+generated from the 0.31.0-3 runtime Cargo.lock file for the
+aarch64-apple-darwin target. Build-only and development-only dependencies are
+excluded. The runtime statically incorporates libffi 3.5.2 through
+libffi-sys@4.1.0; its copyright and MIT permission notice is in
+LIBFFI-MIT.txt. Its exact package source is available at:
+
+https://crates.io/crates/libffi-sys/4.1.0
+
+The cua_driver_node_runtime.node file is CUA's compatibility build of that
+runtime. Its corresponding source also includes CUA's deterministic build and
+transformation script and the MPL-2.0 source file it adds to the runtime:
+
+https://github.com/trycua/cua/blob/cua-driver-rs-v0.55.0/libs/cua-driver/scripts/build-node-runtime.mjs
+https://github.com/trycua/cua/blob/cua-driver-rs-v0.55.0/libs/cua-driver/scripts/node-runtime-trampoline-cache.rs
+
+The CUA source tree pins the upstream package and records its integrity in:
+
+https://github.com/trycua/cua/blob/cua-driver-rs-v0.55.0/libs/cua-driver/typescript/package-lock.json
+
+The Rust report links each MPL-covered Rust package and exact version to its
+source. Versioned package source is also available from crates.io, including:
+
+https://github.com/mozilla/uniffi-rs/tree/v0.31.0
+https://github.com/mozilla/uniffi-rs/tree/309762f55db3f0548194a9ceba3027fa64b18a93
+https://crates.io/crates/uniffi/0.31.0
+https://crates.io/crates/uniffi_core/0.31.0
+
+Cua Driver Node runtime notice
+------------------------------
+
+`cua_driver_node_runtime.node` is a compatibility build derived from the N-API
+runtime in `uniffi-bindgen-react-native` 0.31.0-3, copyright its contributors
+and licensed under the Mozilla Public License 2.0.
+
+The corresponding source is the pinned npm development dependency plus the
+deterministic transformations in `scripts/build-node-runtime.mjs` and the
+source file `scripts/node-runtime-trampoline-cache.rs` they add. The source,
+build script, and added file are available in the Cua repository at the
+release tag that matches this package.
+
+https://www.mozilla.org/MPL/2.0/
+
+Inter font
+----------
+
+The CUA cursor overlay embeds the Inter font. It is distributed under the SIL
+Open Font License 1.1. The full copyright and license notice is in
+INTER-OFL-1.1.txt. The corresponding font and license source is available at:
+
+https://github.com/trycua/cua/tree/cua-driver-rs-v0.55.0/libs/cua-driver/rust/crates/cursor-overlay/assets
+
+Anthropic Claude Agent SDK
+--------------------------
+
+AI Coding Tool redistributes @anthropic-ai/claude-agent-sdk@0.3.329.
+This package is proprietary software, not open source.
+
+© Anthropic PBC. All rights reserved.
+
+AI Coding Tool's use of the Agent SDK is subject to Anthropic's Commercial
+Terms. The SDK's original license points to Anthropic's legal agreements:
+
+https://code.claude.com/docs/en/legal-and-compliance
+https://www.anthropic.com/legal/commercial-terms
+
+AI Coding Tool does not redistribute the Claude Code executable supplied as
+the SDK's optional native package. It connects the SDK to an unmodified Claude
+Code executable installed by the user. Each user's CLI use is authenticated,
+governed, and billed under that user's own applicable agreement with Anthropic.
+
+npm runtime, renderer, and font licenses
+----------------------------------------
+
+The copyright notices and license texts for npm packages loaded by the main
+process, native terminal support, and bundled font files are in
+NPM-RUNTIME-LICENSES.txt. The build generates notices for JavaScript folded
+into the desktop interface as RENDERER-THIRD-PARTY-LICENSES.md. These files sit
+beside this notice in the packaged app.
+
+Names and trademarks
+--------------------
+
+The CUA, Claude, Claude Code, Anthropic, and other third-party names in these
+notices identify their respective software and owners. The licenses listed
+here do not grant trademark rights. AI Coding Tool does not use third-party
+logos or claim that those owners built, endorsed, or partnered with it.

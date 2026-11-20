@@ -1,0 +1,306 @@
+import { Children, createContext, isValidElement, memo, useContext, useMemo, useRef, useState, type ComponentProps, type ReactElement, type ReactNode } from "react";
+import { LuFileText as FileText, LuMessageSquareText as ThreadGlyph } from "react-icons/lu";
+import Markdown, { defaultUrlTransform, type ExtraProps } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { parseFileHref, parseThreadHref } from "../../domain/markdown-links";
+import { Chip } from "../ui/Chip";
+import { Copyable } from "./CopyButton";
+import { MermaidBlock } from "./MermaidBlock";
+import { VisualBlock } from "./VisualBlock";
+import { ContextMenu, type MenuEntry } from "./PopoverMenu";
+import { isCommitHash, messageImagePath, messageImageUrl } from "../../domain/message-artifacts";
+import { messageImages, type MessageImage } from "../../application/message-images";
+import { useKnownCommit } from "../known-commits";
+import { MAX_VISUAL_SOURCE, VISUAL_LANGUAGE } from "../../domain/visual-frame";
+import { modHeld, platformCapabilities } from "../platform";
+import { copyText } from "../clipboard";
+
+const APP_HREF = /^aicodingtool:/i;
+const WEB_HREF = /^https?:/i;
+const FILE_HREF = /^file:/i;
+
+/** What a link in a message can reach. A handler the host leaves out makes that link plain text. */
+export type MessageLinkActions = {
+  selectThread?: (threadId: string) => void;
+  openFile?: (path: string, line: number | null) => void;
+  openUrlInApp?: (url: string) => void;
+  /** `gallery` lists the pictures shown beside this one, in order. */
+  openImage?: (source: string, gallery?: string[]) => void;
+  openCommit?: (commit: string, taskId?: string) => void;
+};
+
+/** The thread a transcript belongs to, and the checkout its commits are looked up in. */
+export const MessageArtifactScope = createContext<{ root: string; taskId?: string; workspaceId?: string }>({ root: "" });
+const MessageId = createContext("");
+/** The full-size sources of a message's image previews, in the order they are shown. */
+const MessageGallery = createContext<string[]>([]);
+const CodeBlock = createContext(false);
+
+const MessageLinks = createContext<MessageLinkActions>({});
+
+export function MessageLinkProvider({ actions, children }: { actions: MessageLinkActions; children: ReactNode }) {
+  return <MessageLinks.Provider value={actions}>{children}</MessageLinks.Provider>;
+}
+
+export function useMessageLinks() {
+  return useContext(MessageLinks);
+}
+
+/** Whether this document is the part of a stream still being written, whose last block will grow. */
+const Unsettled = createContext(false);
+
+/** The Markdown this document was rendered from, which a block slices to copy itself back out. */
+const Source = createContext("");
+
+/** What a node was written as. A block still being streamed has nothing settled to copy yet. */
+function useBlockSource(node: ExtraProps["node"]) {
+  const source = useContext(Source);
+  const unsettled = useContext(Unsettled);
+  const at = node?.position;
+  if (unsettled || !at) return "";
+  return source.slice(at.start.offset ?? 0, at.end.offset ?? 0);
+}
+
+function MarkdownPre({ children, node, ...props }: ComponentProps<"pre"> & ExtraProps) {
+  const unsettled = useContext(Unsettled);
+  const child = Children.count(children) === 1 ? Children.only(children) : null;
+  const code = isValidElement<{ className?: string; children?: ReactNode }>(child) ? child : null;
+  /** The fence marks frame the block, so what is copied is only what was written inside them. */
+  const inside = String(code?.props.children ?? "").replace(/\n$/, "");
+  const copied = unsettled ? "" : inside;
+  const languages = code?.props.className?.split(" ") ?? [];
+  if (languages.includes(`language-${VISUAL_LANGUAGE}`) && inside.length <= MAX_VISUAL_SOURCE) {
+    return (
+      <Copyable text={copied} label="Copy the visual's HTML">
+        <VisualBlock source={inside} pending={unsettled} />
+      </Copyable>
+    );
+  }
+  if (languages.includes("language-mermaid")) {
+    return (
+      <Copyable text={copied} label="Copy the diagram">
+        <MermaidBlock source={inside} pending={unsettled} />
+      </Copyable>
+    );
+  }
+  const language = languages.find((name) => name.startsWith("language-"))?.slice("language-".length);
+  return (
+    <Copyable text={copied} label="Copy the code" className={language ? "code-block" : undefined}>
+      {language && <div className="code-block-head" aria-hidden="true">{language}</div>}
+      <CodeBlock.Provider value><pre {...props}>{children}</pre></CodeBlock.Provider>
+    </Copyable>
+  );
+}
+
+/** A table has no plain text of its own, so it is copied as the Markdown it was written as. */
+function MarkdownTable({ node, ...props }: ComponentProps<"table"> & ExtraProps) {
+  const source = useBlockSource(node);
+  return (
+    <Copyable text={source} label="Copy the table" className="copyable-table">
+      <table {...props} />
+    </Copyable>
+  );
+}
+
+/** Opens in the browser, or with the platform's command modifier held, in the app's own browser panel. */
+export function WebLink({ children, openInApp, ...props }: ComponentProps<"a"> & { openInApp?: () => void }) {
+  const link = useRef<HTMLAnchorElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const href = props.href ?? "";
+  const entries: MenuEntry[] = [
+    { label: "Open in browser", onSelect: () => { window.open(href, "_blank", "noreferrer"); } },
+    ...(openInApp ? [{ label: "Open in AI Coding Tool", shortcut: `${platformCapabilities().modLabel}Click`, onSelect: openInApp }] : []),
+    "separator",
+    { label: "Copy link", onSelect: () => { void copyText(href); } },
+  ];
+  return (
+    <>
+      <a
+        {...props}
+        ref={link}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(event) => {
+          props.onClick?.(event);
+          if (!openInApp || event.defaultPrevented || !modHeld(event)) return;
+          event.preventDefault();
+          openInApp();
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        {children}
+      </a>
+      {menu && <ContextMenu at={menu} returnFocus={link} onClose={() => setMenu(null)} entries={entries} />}
+    </>
+  );
+}
+
+/** Opens the file on click; its menu also copies the path. */
+function FileLink({ path, line, onOpen, children, ...props }: ComponentProps<"a"> & { path: string; line: number | null; onOpen: () => void }) {
+  const link = useRef<HTMLAnchorElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const entries: MenuEntry[] = [
+    { label: "Open file", onSelect: onOpen },
+    "separator",
+    { label: "Copy path", onSelect: () => { void copyText(path); } },
+  ];
+  return (
+    <>
+      <a
+        {...props}
+        ref={link}
+        className="message-link-file"
+        data-tip={line === null ? path : `${path}:${line}`}
+        onClick={(event) => { event.preventDefault(); onOpen(); }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        <FileText className="message-link-glyph" aria-hidden="true" />{children}
+      </a>
+      {menu && <ContextMenu at={menu} returnFocus={link} onClose={() => setMenu(null)} entries={entries} />}
+    </>
+  );
+}
+
+function MarkdownLink({ children, ...props }: ComponentProps<"a">) {
+  const actions = useContext(MessageLinks);
+  const scope = useContext(MessageArtifactScope);
+  const messageId = useContext(MessageId);
+  const href = props.href ?? "";
+  const threadId = parseThreadHref(href);
+  if (threadId && actions.selectThread) return (
+    <Chip as="a" variant="link" {...props} className="message-link-thread" onClick={(event) => { event.preventDefault(); actions.selectThread!(threadId); }}>
+      <ThreadGlyph className="message-link-glyph" aria-hidden="true" />{children}
+    </Chip>
+  );
+  /** Anything else under the scheme is text, never a live link. */
+  if (APP_HREF.test(href)) return <>{children}</>;
+  const gallery = useContext(MessageGallery);
+  const image = messageImagePath(href);
+  if (image && messageId && actions.openImage) return <a {...props} onClick={(event) => {
+    event.preventDefault();
+    actions.openImage!(messageImageUrl(image, scope.root, messageId, false, scope.taskId), gallery);
+  }}>{children}</a>;
+  const file = parseFileHref(href);
+  if (file) return actions.openFile
+    ? <FileLink {...props} path={file.file} line={file.line} onOpen={() => actions.openFile!(file.file, file.line)}>{children}</FileLink>
+    : <>{children}</>;
+  if (WEB_HREF.test(href)) return <WebLink {...props} openInApp={actions.openUrlInApp && (() => actions.openUrlInApp!(href))}>{children}</WebLink>;
+  return <a {...props} target="_blank" rel="noreferrer">{children}</a>;
+}
+
+function MarkdownCode({ children, ...props }: ComponentProps<"code">) {
+  const actions = useContext(MessageLinks);
+  const scope = useContext(MessageArtifactScope);
+  const block = useContext(CodeBlock);
+  const hash = typeof children === "string" && !block && isCommitHash(children) ? children : null;
+  /** A reply can name a commit in some other repository, which has no diff here to open. */
+  const known = useKnownCommit(actions.openCommit ? scope.workspaceId : undefined, hash);
+  return hash && known && actions.openCommit
+    ? <button type="button" className="message-commit" aria-label={`View commit ${hash}`} data-tip="Open commit" onClick={() => actions.openCommit!(hash, scope.taskId)}><code {...props}>{children}</code></button>
+    : <code {...props}>{children}</code>;
+}
+
+function MessageImagePreview({ image: linked, messageId }: { image: MessageImage; messageId: string }) {
+  const scope = useContext(MessageArtifactScope);
+  const actions = useContext(MessageLinks);
+  const gallery = useContext(MessageGallery);
+  const [failed, setFailed] = useState(false);
+  const source = messageImageUrl(linked.path, scope.root, messageId, false, scope.taskId);
+  const unavailable = <>{linked.label} · Preview unavailable</>;
+  return <div className="message-image-preview">
+    {failed ? (actions.openFile
+      ? <button type="button" className="message-image-unavailable" data-tip={linked.path} onClick={() => actions.openFile!(linked.path, null)}><FileText className="message-link-glyph" aria-hidden="true" />{unavailable}</button>
+      : <span className="message-image-unavailable">{unavailable}</span>) :
+      <button type="button" aria-label={`Enlarge ${linked.label}`} onClick={() => actions.openImage?.(source, gallery)}>
+        <img src={messageImageUrl(linked.path, scope.root, messageId, true, scope.taskId)} alt={linked.label} loading="lazy" decoding="async" onError={() => setFailed(true)} />
+      </button>}
+  </div>;
+}
+
+/** Local Markdown images use the same bounded preview gallery as links, rather than a file: URL. */
+function MarkdownImage({ src, alt, ...props }: ComponentProps<"img">) {
+  if (typeof src === "string" && messageImagePath(src)) return <span>{alt}</span>;
+  return <img {...props} src={src} alt={alt} loading="lazy" />;
+}
+
+type HastNode = { type: string; tagName?: string; value?: string; children?: HastNode[] };
+
+/** Splits rendered prose into words so each one can fade in as it is read out. Code keeps its shape. */
+function wordSpans() {
+  const split = (value: string): HastNode[] => value.split(/(?<=\s)(?=\S)/).map((word) => ({
+    type: "element",
+    tagName: "span",
+    properties: { className: ["stream-word"] },
+    children: [{ type: "text", value: word }],
+  } as HastNode));
+  const walk = (node: HastNode) => {
+    if (!node.children || node.tagName === "code" || node.tagName === "pre") return;
+    node.children = node.children.flatMap((child) => {
+      /** Whitespace between structural nodes is not prose, and a span there is invalid inside a table. */
+      if (child.type === "text") return /\S/.test(child.value ?? "") ? split(child.value ?? "") : child;
+      walk(child);
+      return child;
+    });
+  };
+  return walk;
+}
+
+const REMARK = [remarkGfm];
+const NO_REHYPE: [] = [];
+const ANIMATE_REHYPE = [wordSpans];
+const COMPONENTS = { pre: MarkdownPre, table: MarkdownTable, a: MarkdownLink, code: MarkdownCode, img: MarkdownImage };
+/** A `file:` link opens like a bare path does. An image never loads straight from the disk. */
+const urlTransform = (url: string, key: string) => (APP_HREF.test(url) || (key === "href" && FILE_HREF.test(url)) ? url : defaultUrlTransform(url));
+
+/** Rendered trees of finished text, newest last, bounded by the characters they were parsed from. */
+const rendered = new Map<string, ReactElement>();
+let cachedChars = 0;
+const CACHE_CHARS = 512 * 1024;
+
+/** `Markdown` holds no hooks, so its tree can be built here and kept for the next mount of the same text. */
+function renderMarkdown(text: string, animate: boolean, cache: boolean) {
+  const options = { children: text, remarkPlugins: REMARK, rehypePlugins: animate ? ANIMATE_REHYPE : NO_REHYPE, skipHtml: true, urlTransform, components: COMPONENTS };
+  if (animate || !cache || text.length > CACHE_CHARS / 8) return Markdown(options);
+  const hit = rendered.get(text);
+  if (hit) {
+    rendered.delete(text);
+    rendered.set(text, hit);
+    return hit;
+  }
+  const tree = Markdown(options);
+  rendered.set(text, tree);
+  cachedChars += text.length;
+  for (const [oldest] of rendered) {
+    if (cachedChars <= CACHE_CHARS) break;
+    rendered.delete(oldest);
+    cachedChars -= oldest.length;
+  }
+  return tree;
+}
+
+/** `cache` keeps the parsed tree across mounts, for text that is finished and will be shown again. */
+export const MarkdownMessage = memo(function MarkdownMessage({ children, animate, cache, messageId = "" }: { children: string; animate?: boolean; cache?: boolean; messageId?: string }) {
+  const actions = useContext(MessageLinks);
+  const images = useMemo(() => !animate && messageId && actions.openImage ? messageImages(children) : [], [children, animate, messageId, actions.openImage]);
+  const scope = useContext(MessageArtifactScope);
+  const gallery = useMemo(() => images.map((linked) => messageImageUrl(linked.path, scope.root, messageId, false, scope.taskId)), [images, scope.root, scope.taskId, messageId]);
+  const tree = useMemo(() => renderMarkdown(children, !!animate, !!cache), [children, animate, cache]);
+  return (
+    <MessageId.Provider value={messageId}>
+    <MessageGallery.Provider value={gallery}>
+    <Unsettled.Provider value={!!animate}>
+      <Source.Provider value={children}>
+        {tree}
+        {images.length > 0 && <div className="message-image-previews">{images.map((linked) => <MessageImagePreview key={`${messageId}:${linked.path}`} image={linked} messageId={messageId} />)}</div>}
+      </Source.Provider>
+    </Unsettled.Provider>
+    </MessageGallery.Provider>
+    </MessageId.Provider>
+  );
+});
