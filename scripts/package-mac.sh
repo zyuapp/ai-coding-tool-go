@@ -22,17 +22,41 @@ sign_flags=(--force --sign $sign_identity --options runtime)
 version=$(sed -n 's/^ *"productVersion": "\(.*\)",*$/\1/p' $root/wails.json | head -1)
 [[ -n $version ]] || { echo "Could not read the version from wails.json." >&2; exit 1 }
 
+work=$(mktemp -d)
+background=()
+trap 'kill $background 2>/dev/null; rm -rf $work' EXIT
+
+# The helpers and the icon do not depend on the renderer or the binary, so they build alongside them.
+echo "Building the native helpers…"
+(cd $root && go run ./native/build && zsh $root/scripts/prepare-cua-driver.sh) &
+helpers=$!
+background+=($helpers)
+
+# The icon: Icon Composer's file when Xcode can compile it, else the flat PNG.
+if xcrun -f actool >/dev/null 2>&1; then
+  compiled_icon=1
+  cp -R $root/assets/icon.icon $work/AppIcon.icon
+  mkdir -p $work/icon
+  xcrun actool $work/AppIcon.icon --compile $work/icon --app-icon AppIcon --enable-on-demand-resources NO \
+    --development-region en --target-device mac --platform macosx --minimum-deployment-target $minimum_macos \
+    --output-partial-info-plist $work/partial.plist >/dev/null &
+else
+  compiled_icon=0
+  iconset=$work/AppIcon.iconset
+  mkdir -p $iconset $work/icon
+  (for size in 16 32 64 128 256 512; do
+    sips -z $size $size $root/assets/icon.png --out $iconset/icon_${size}x${size}.png >/dev/null
+    sips -z $((size * 2)) $((size * 2)) $root/assets/icon.png --out $iconset/icon_${size}x${size}@2x.png >/dev/null
+  done
+  iconutil -c icns $iconset -o $work/icon/AppIcon.icns) &
+fi
+icon=$!
+background+=($icon)
+
 if [[ ${SKIP_FRONTEND:-} != 1 ]]; then
   echo "Building the renderer…"
   npm --prefix $root/frontend run build
 fi
-
-echo "Building the native helpers…"
-(cd $root && go run ./native/build)
-zsh $root/scripts/prepare-cua-driver.sh
-
-work=$(mktemp -d)
-trap 'rm -rf $work' EXIT
 
 echo "Building the app binary $version…"
 (cd $root && CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
@@ -41,6 +65,10 @@ echo "Building the app binary $version…"
   go build -trimpath -tags desktop,production \
     -ldflags "-w -s -X github.com/zyuapp/ai-coding-tool-go/internal/platform.packaged=true" \
     -o $work/$executable .)
+
+wait $helpers || { echo "The native helpers did not build." >&2; exit 1 }
+wait $icon || { echo "The icon did not build." >&2; exit 1 }
+background=()
 
 echo "Assembling $app…"
 rm -rf $app
@@ -54,25 +82,12 @@ for helper in aic-dictation aic-simulator; do
   [[ -f $root/native/bin/$helper ]] && cp $root/native/bin/$helper "$app/Contents/Resources/native/"
 done
 
-# The icon: Icon Composer's file when Xcode can compile it, else the flat PNG.
 icon_plist=""
-if xcrun -f actool >/dev/null 2>&1; then
-  cp -R $root/assets/icon.icon $work/AppIcon.icon
-  mkdir -p $work/icon
-  xcrun actool $work/AppIcon.icon --compile $work/icon --app-icon AppIcon --enable-on-demand-resources NO \
-    --development-region en --target-device mac --platform macosx --minimum-deployment-target $minimum_macos \
-    --output-partial-info-plist $work/partial.plist >/dev/null
-  cp $work/icon/AppIcon.icns $work/icon/Assets.car "$app/Contents/Resources/"
+cp $work/icon/AppIcon.icns "$app/Contents/Resources/"
+if [[ $compiled_icon == 1 ]]; then
+  cp $work/icon/Assets.car "$app/Contents/Resources/"
   icon_plist="	<key>CFBundleIconName</key>
 	<string>AppIcon</string>"
-else
-  iconset=$work/AppIcon.iconset
-  mkdir -p $iconset
-  for size in 16 32 64 128 256 512; do
-    sips -z $size $size $root/assets/icon.png --out $iconset/icon_${size}x${size}.png >/dev/null
-    sips -z $((size * 2)) $((size * 2)) $root/assets/icon.png --out $iconset/icon_${size}x${size}@2x.png >/dev/null
-  done
-  iconutil -c icns $iconset -o "$app/Contents/Resources/AppIcon.icns"
 fi
 
 cat > "$app/Contents/Info.plist" <<PLIST

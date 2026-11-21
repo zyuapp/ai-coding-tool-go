@@ -1,7 +1,6 @@
 {
   "name": "ai-coding-tool-frontend",
   "private": true,
-  "version": "0.10.39",
   "type": "module",
   "scripts": {
     "dev": "vite",
