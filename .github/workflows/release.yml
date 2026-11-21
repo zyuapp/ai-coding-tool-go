@@ -231,6 +231,12 @@ jobs:
     env:
       ARCH: ${{ matrix.arch }}
     steps:
+      # Runs while the steps below set up Go and Node; "Wait for build dependencies" collects it.
+      - name: Start installing build dependencies
+        run: |
+          # Skips man-db's index rebuild, the slowest part of an install on runners.
+          sudo rm -f /var/lib/man-db/auto-update
+          nohup sh -c 'sudo apt-get update -o Acquire::Languages=none && sudo apt-get install -y --no-install-recommends build-essential pkg-config file libgtk-3-dev libwebkit2gtk-4.1-dev; echo $? > "$RUNNER_TEMP/apt.status.tmp" && mv "$RUNNER_TEMP/apt.status.tmp" "$RUNNER_TEMP/apt.status"' > "$RUNNER_TEMP/apt.log" 2>&1 &
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Read the version
         run: |
@@ -245,12 +251,6 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Install build dependencies
-        run: |
-          # Skips man-db's index rebuild, the slowest part of an install on runners.
-          sudo rm -f /var/lib/man-db/auto-update
-          sudo apt-get update -o Acquire::Languages=none
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config file libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Install appimagetool
         env:
           APPIMAGETOOL_SHA256: ${{ matrix.appimagetool_sha256 }}
@@ -265,6 +265,11 @@ jobs:
           echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
       - name: Install the renderer's dependencies
         run: npm --prefix frontend ci
+      - name: Wait for build dependencies
+        run: |
+          while [ ! -f "$RUNNER_TEMP/apt.status" ]; do sleep 1; done
+          cat "$RUNNER_TEMP/apt.log"
+          exit "$(cat "$RUNNER_TEMP/apt.status")"
       - name: Build Linux packages
         run: bash scripts/package-linux.sh "$PWD/release"
       - name: Write the update feed

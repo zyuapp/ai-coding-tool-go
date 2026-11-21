@@ -63,11 +63,18 @@ MimeType=x-scheme-handler/$url_scheme;
 DESKTOP
 
 mkdir -p "$out"
-echo "Writing $out/$name.tar.gz…"
-tar -C "$appdir/usr" -czf "$out/$name.tar.gz" --transform "s,^\.,$name," .
+
+write_tar() {
+  echo "Writing $out/$name.tar.gz…"
+  tar -C "$appdir/usr" -czf "$out/$name.tar.gz" --transform "s,^\.,$name," .
+}
 
 # The Electron app's package name and folder, so installing this one replaces it in place.
-if command -v dpkg-deb >/dev/null 2>&1; then
+write_deb() {
+  if ! command -v dpkg-deb >/dev/null 2>&1; then
+    echo "dpkg-deb is not on PATH; skipped the .deb."
+    return
+  fi
   deb=$work/deb
   install_dir="/opt/$app_name"
   mkdir -p "$deb$install_dir" "$deb/usr/bin" "$deb/DEBIAN"
@@ -99,18 +106,26 @@ POSTINST
   chmod 755 "$deb/DEBIAN/postinst"
   echo "Writing $out/$name.deb…"
   dpkg-deb --build --root-owner-group "$deb" "$out/$name.deb"
-else
-  echo "dpkg-deb is not on PATH; skipped the .deb."
-fi
+}
 
-if command -v appimagetool >/dev/null 2>&1; then
+write_appimage() {
+  if ! command -v appimagetool >/dev/null 2>&1; then
+    echo "appimagetool is not on PATH; skipped the AppImage."
+    return
+  fi
   ln -s "usr/bin/$executable" "$appdir/AppRun"
   cp "$appdir/usr/share/applications/$app_id.desktop" "$appdir/"
   cp "$root/assets/icon.png" "$appdir/$app_id.png"
   echo "Writing $out/$name.AppImage…"
   rm -f "$out/$name.AppImage"
   ARCH=$arch appimagetool --no-appstream "$appdir" "$out/$name.AppImage"
-else
-  echo "appimagetool is not on PATH; skipped the AppImage."
-fi
+}
+
+# Each package only reads $appdir/usr, so they are written at once.
+write_tar & tar_job=$!
+write_deb & deb_job=$!
+write_appimage & appimage_job=$!
+wait $tar_job || { echo "The .tar.gz was not written." >&2; exit 1; }
+wait $deb_job || { echo "The .deb was not written." >&2; exit 1; }
+wait $appimage_job || { echo "The AppImage was not written." >&2; exit 1; }
 echo "Built $name in $out"
