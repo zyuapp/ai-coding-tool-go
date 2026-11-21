@@ -75,6 +75,23 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install the renderer's dependencies
         run: npm --prefix frontend ci
+      - name: Restore the dictation helper
+        id: dictation-helper
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/bin/aic-dictation
+          key: dictation-helper-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/dictation/Package.resolved', 'native/dictation/Package.swift', 'native/dictation/Sources/**') }}
+      # The build skips a helper newer than its sources, and checkout gave the sources the current time.
+      - if: steps.dictation-helper.outputs.cache-hit == 'true'
+        run: touch native/bin/aic-dictation
+      - name: Restore the dictation helper build
+        if: steps.dictation-helper.outputs.cache-hit != 'true'
+        id: dictation
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/dictation/.build
+          key: dictation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/dictation/Package.resolved', 'native/dictation/Package.swift', 'native/dictation/Sources/**') }}
+          restore-keys: dictation-${{ runner.os }}-${{ runner.arch }}-
       - name: Check for signing credentials
         id: signing
         env:
@@ -117,6 +134,18 @@ jobs:
           echo "MAC_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
       - name: Build the app
         run: zsh scripts/package-mac.sh "$RUNNER_TEMP/package"
+      - name: Save the dictation helper
+        if: steps.dictation-helper.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/bin/aic-dictation
+          key: ${{ steps.dictation-helper.outputs.cache-primary-key }}
+      - name: Save the dictation helper build
+        if: steps.dictation-helper.outputs.cache-hit != 'true' && steps.dictation.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/dictation/.build
+          key: ${{ steps.dictation.outputs.cache-primary-key }}
       - name: Notarize the app
         if: steps.signing.outputs.enabled == 'true'
         env:
