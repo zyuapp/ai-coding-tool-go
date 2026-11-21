@@ -89,6 +89,14 @@ Homepage: https://github.com/zyuapp/ai-coding-tool-go
 Description: $app_name
  A fast local desktop client for Claude and Codex coding tasks.
 CONTROL
+  # Replacing the Electron package runs its postrm, which removes /usr/bin/$executable through
+  # update-alternatives after this package has unpacked it.
+  cat > "$deb/DEBIAN/postinst" <<POSTINST
+#!/bin/sh
+set -e
+ln -sf "$install_dir/bin/$executable" "/usr/bin/$executable"
+POSTINST
+  chmod 755 "$deb/DEBIAN/postinst"
   echo "Writing $out/$name.deb…"
   dpkg-deb --build --root-owner-group "$deb" "$out/$name.deb"
 else

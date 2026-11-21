@@ -8,7 +8,7 @@ An extremely opinionated wrapper for Claude Code, Codex, and OpenCode, rewritten
 curl -fsSL https://raw.githubusercontent.com/zyuapp/ai-coding-tool-go/main/install.sh | sh
 ```
 
-macOS installs to `/Applications`; Linux installs an AppImage to `~/Applications`. The app updates itself. Packages (`.dmg`, `.zip`, `.deb`, `.tar.gz`, `.AppImage`) are on the [releases page](https://github.com/zyuapp/ai-coding-tool-go/releases).
+macOS installs to `/Applications`; Linux installs an AppImage to `~/Applications`, or upgrades the `.deb` if one is installed. It replaces the Electron app in place, keeping your threads and settings. The app updates itself. Packages (`.dmg`, `.zip`, `.deb`, `.tar.gz`, `.AppImage`) are on the [releases page](https://github.com/zyuapp/ai-coding-tool-go/releases).
 
 ## Build from source
 

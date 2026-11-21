@@ -9,6 +9,11 @@ set -eu
 
 REPO="zyuapp/ai-coding-tool-go"
 DOWNLOAD="https://github.com/$REPO/releases/latest/download"
+APP_NAME="AI Coding Tool"
+BUNDLE_ID=com.zyuapp.aicodingtool
+# The Electron app's .deb uses the same package name and folder.
+DEB_PACKAGE=ai-coding-tool
+DEB_DIR="/opt/AI Coding Tool"
 
 fail() { printf '\nInstall failed: %s\n' "$1" >&2; exit 1; }
 say() { printf '%s\n' "$1"; }
@@ -75,6 +80,15 @@ fuse2_command() {
   esac
 }
 
+as_root() {
+  if [ "$(id -u)" = 0 ]; then "$@"
+  elif command -v sudo >/dev/null 2>&1; then sudo "$@"
+  else return 1
+  fi
+}
+
+can_root() { [ "$(id -u)" = 0 ] || command -v sudo >/dev/null 2>&1; }
+
 # Empty when this system has no known command.
 fuse2_root_command() {
   base="$(fuse2_command)"
@@ -94,24 +108,90 @@ install_fuse2() {
   has_fuse2
 }
 
+# Installed builds are Electron (the earlier app) or Go (this one). Both use the same profile, so
+# threads and settings carry over either way.
+mac_build() {
+  if [ -d "$1/Contents/Frameworks/Electron Framework.framework" ]; then echo Electron; else echo Go; fi
+}
+
+mac_version() { /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || true; }
+
+mac_running() { pgrep -f "/$APP_NAME.app/Contents/MacOS/" >/dev/null 2>&1; }
+
+# Asks the app to quit as the Dock's Quit does, so it can save its work or ask first. Then waits out
+# ShipIt, which installs an Electron update the app downloaded once the app has quit.
+quit_mac() {
+  if mac_running; then
+    say "Quitting $APP_NAME so it can be replaced."
+    osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+  fi
+  waited=0
+  while mac_running || pgrep -x ShipIt >/dev/null 2>&1; do
+    [ "$waited" -lt 60 ] || fail "$APP_NAME is still running. Quit it, then run this again."
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+deb_installed() {
+  command -v dpkg-query >/dev/null 2>&1 \
+    && dpkg-query -W -f '${Status}' "$DEB_PACKAGE" 2>/dev/null | grep -q 'ok installed'
+}
+
+deb_build() { if [ -e "$DEB_DIR/resources/app.asar" ]; then echo Electron; else echo Go; fi; }
+
+deb_version() { dpkg-query -W -f '${Version}' "$DEB_PACKAGE" 2>/dev/null || true; }
+
+# Electron AppImages carry Chromium and pass 100 MB; Go ones are under half that. Their runtimes
+# cannot be relied on to list their contents.
+appimage_build() {
+  if [ "$(wc -c < "$1" | tr -d ' ')" -gt 100000000 ]; then echo Electron; else echo Go; fi
+}
+
+linux_running() { pgrep -x aicodingtool >/dev/null 2>&1; }
+
+# $1 is the installed build (Electron or Go), $2 its version when known.
+announce() {
+  if [ "$1" = Electron ]; then
+    say "Replacing the Electron build of $APP_NAME${2:+ $2} with the Go build $version. Your threads and settings carry over."
+  elif [ "${2:-}" = "$version" ]; then
+    say "Reinstalling $APP_NAME $version."
+  elif [ -n "${2:-}" ]; then
+    say "Updating $APP_NAME $2 to $version."
+  else
+    say "Updating $APP_NAME to $version."
+  fi
+}
+
 command -v curl >/dev/null 2>&1 || fail "curl is required."
 
 system="$(uname -s)"
 feed_name="$(feed_for "$system" "$(uname -m)")"
 feed="$(curl -fsSL "$DOWNLOAD/$feed_name")" || fail "Could not read the latest release ($feed_name)."
 version="$(printf '%s\n' "$feed" | sed -n 's/^version: *//p' | head -n 1 | tr -d "\"'")"
-if [ "$system" = Darwin ]; then suffix=.zip; else suffix=.AppImage; fi
+
+existing=""
+if [ "$system" = Darwin ]; then
+  suffix=.zip
+  for directory in /Applications "$HOME/Applications"; do
+    if [ -d "$directory/$APP_NAME.app" ]; then existing="$directory/$APP_NAME.app"; break; fi
+  done
+  if [ -n "$existing" ] && [ -w "$(dirname "$existing")" ]; then
+    applications="$(dirname "$existing")"
+  else
+    applications=/Applications
+    [ -w "$applications" ] || applications="$HOME/Applications"
+  fi
+else
+  suffix=.AppImage
+  applications="$HOME/Applications"
+  # A .deb install is upgraded as a .deb, so its menu entry and command keep pointing at one app.
+  if deb_installed && [ -n "$(pick .deb)" ] && can_root; then suffix=.deb; fi
+fi
 set -- $(pick "$suffix")
 asset="${1:-}"
 checksum="${2:-}"
 [ -n "$asset" ] && [ -n "$checksum" ] || fail "The release feed could not be read."
-
-if [ "$system" = Darwin ]; then
-  applications=/Applications
-  [ -w "$applications" ] || applications="$HOME/Applications"
-else
-  applications="$HOME/Applications"
-fi
 mkdir -p "$applications"
 
 # Staged inside the destination so the final move is a rename on the same filesystem.
@@ -120,35 +200,51 @@ rm -rf "$staging"
 mkdir "$staging"
 trap 'rm -rf "$staging"' EXIT INT TERM
 
-say "Downloading AI Coding Tool $version for $system $(uname -m)."
+say "Downloading $APP_NAME $version for $system $(uname -m)."
 curl -fL --retry 3 --progress-bar -o "$staging/$asset" "$DOWNLOAD/$asset" \
   || fail "The download did not finish."
 verify "$staging/$asset" "$checksum"
 
 if [ "$system" = Darwin ]; then
-  if pgrep -f "/AI Coding Tool.app/Contents/MacOS/" >/dev/null 2>&1; then
-    fail "AI Coding Tool is running. Quit it, then run this again."
-  fi
   /usr/bin/ditto -x -k "$staging/$asset" "$staging/unpacked" || fail "The download could not be unpacked."
   bundle="$(cd "$staging/unpacked" && ls -d ./*.app 2>/dev/null | head -n 1 | sed 's|^\./||')"
   [ -n "$bundle" ] || fail "The download contained no app."
   target="$applications/$bundle"
+  if [ -d "$target" ]; then announce "$(mac_build "$target")" "$(mac_version "$target")"; fi
+  quit_mac
   rm -rf "$target"
   mv "$staging/unpacked/$bundle" "$target"
   xattr -dr com.apple.quarantine "$target" 2>/dev/null || true
   say "Installed $target"
   open -a "$target"
+elif [ "$suffix" = .deb ]; then
+  announce "$(deb_build)" "$(deb_version)"
+  as_root apt-get install -y --reinstall "$staging/$asset" || fail "The package could not be installed."
+  say "Installed $DEB_DIR"
+  if linux_running; then
+    say "Quit and reopen $APP_NAME to switch to $version."
+  else
+    launch_linux aicodingtool
+  fi
 else
   target="$applications/AICodingTool.AppImage"
+  if [ -f "$target" ]; then announce "$(appimage_build "$target")"; fi
+  running=no
+  if linux_running; then running=yes; fi
   chmod 755 "$staging/$asset"
   mv -f "$staging/$asset" "$target"
   say "Installed $target"
-  if has_fuse2 || install_fuse2; then
-    launch_linux "$target"
-    say "It adds itself to your app menu the first time it runs."
-  else
+  if deb_installed; then
+    say "The $(deb_build) .deb is still installed. Remove it with: sudo apt remove $DEB_PACKAGE"
+  fi
+  if ! has_fuse2 && ! install_fuse2; then
     manual="$(fuse2_root_command)"
     [ -n "$manual" ] || manual="install the FUSE 2 library"
     say "It needs FUSE 2 before it can start: $manual, then run $target once."
+  elif [ "$running" = yes ]; then
+    say "Quit and reopen $APP_NAME to switch to $version."
+  else
+    launch_linux "$target"
+    say "It adds itself to your app menu the first time it runs."
   fi
 fi

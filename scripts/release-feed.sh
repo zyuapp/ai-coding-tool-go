@@ -2,7 +2,7 @@
 # Usage: scripts/release-feed.sh <version> <file>... > latest-<platform>.yml
 # Writes the update feed internal/updates reads for a release: the version, and each file's name,
 # base64 SHA-512 and size. The updater fetches files by name from the release tagged v<version>, and
-# takes the .zip for its architecture on macOS and the first .AppImage on Linux.
+# takes the .zip for its architecture on macOS and the first .AppImage on Linux; install.sh also takes the .deb.
 set -euo pipefail
 [[ $# -ge 2 ]] || { echo "Usage: $0 <version> <file>..." >&2; exit 1; }
 version=$1

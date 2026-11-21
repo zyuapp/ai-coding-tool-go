@@ -210,7 +210,7 @@ jobs:
       - name: Write the update feed
         env:
           FEED: ${{ matrix.feed }}
-        run: scripts/release-feed.sh "$VERSION" release/*.AppImage > "release/$FEED"
+        run: scripts/release-feed.sh "$VERSION" release/*.AppImage release/*.deb > "release/$FEED"
       - name: Upload Linux packages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
