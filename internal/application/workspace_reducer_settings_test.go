@@ -25,7 +25,7 @@ func TestPanelAndSidebarChoicesPersistAndSurviveTheStoreLoading(t *testing.T) {
 			t.Fatal("preferences not restored")
 		}
 		closed := Reduce(restored, contracts.ViewCommandViewSetSessionPanelOpen{Open: false})
-		coreEqualJSON(t, closed.Effects, `[{"type":"persist-preferences","preferences":{"theme":"aicodingtool-dark","themeMode":"dark","uiFont":"system","monoFont":"system","readingSize":15,"terminalSize":12,"sessionPanelOpen":false,"captureSound":true,"captureFocus":true,"chromeBrowser":false,"computerUse":true,"memoryProtection":true,"browserTools":true,"notifications":true,"sidebarOpen":false,"sections":{"priority":true,"running":true,"threads":true,"snoozed":true},"subagentGroups":{"sidebar":true,"working":true,"idle":true,"failed":true,"stopped":true,"completed":true},"favoriteModels":[],"shortcuts":{},"browserTabs":{},"browserOrigins":[]}}]`, "persist")
+		coreEqualJSON(t, closed.Effects, `[{"type":"persist-preferences","preferences":{"theme":"aicodingtool-dark","themeMode":"dark","uiFont":"system","monoFont":"system","readingSize":15,"terminalSize":12,"sessionPanelOpen":false,"captureSound":true,"captureFocus":true,"chromeBrowser":false,"computerUse":true,"memoryProtection":true,"idleCompaction":true,"browserTools":true,"notifications":true,"sidebarOpen":false,"sections":{"priority":true,"running":true,"threads":true,"snoozed":true},"subagentGroups":{"sidebar":true,"working":true,"idle":true,"failed":true,"stopped":true,"completed":true},"favoriteModels":[],"shortcuts":{},"browserTabs":{},"browserOrigins":[]}}]`, "persist")
 		if closed.State.SessionPanelOpen {
 			t.Fatal("panel still open")
 		}

@@ -25,6 +25,7 @@ func RunRecord(run ActiveRun) *ActiveRunRunning {
 			Origin:         ActiveRunRunningOrigin(run.Origin),
 			Quiet:          run.Quiet,
 			Operation:      (*ActiveRunRunningOperation)(run.Operation),
+			Idle:           run.Idle,
 			UsersOwn:       run.UsersOwn,
 			Status:         ActiveRunRunningStatus("retrying"),
 			TaskID:         run.TaskID,
@@ -73,6 +74,7 @@ func RecordedRun(record ActiveRunRunning, phase RunPhase) ActiveRun {
 			Origin:         ActiveRunRetryingOrigin(record.Origin),
 			Quiet:          record.Quiet,
 			Operation:      (*ActiveRunRetryingOperation)(record.Operation),
+			Idle:           record.Idle,
 			UsersOwn:       record.UsersOwn,
 			Retry:          retrying.Retry,
 			TaskID:         record.TaskID,
@@ -987,6 +989,21 @@ func runsWithMessages(thread *domain.Thread, messages []*domain.ConversationMess
 	return &next
 }
 
+// compactedText is the line a compaction leaves in its thread. idle is one the app started while nobody used the thread.
+func compactedText(event contracts.RunEventContextCompacted, idle bool) string {
+	before := runsLocaleNumber(event.PreTokens)
+	if idle {
+		if event.PostTokens == nil {
+			return "Compacted while idle at " + before + " tokens."
+		}
+		return "Compacted while idle: " + before + " → " + runsLocaleNumber(*event.PostTokens) + " tokens."
+	}
+	if event.PostTokens == nil {
+		return "Context " + string(event.Trigger) + "-compacted at " + before + " tokens."
+	}
+	return "Context " + string(event.Trigger) + "-compacted: " + before + " → " + runsLocaleNumber(*event.PostTokens) + " tokens."
+}
+
 func applyRunEvent(state RunTransitionState, event contracts.RunEvent) RunTransitionState {
 	base := RunEventBaseOf(event)
 	taskID := base.TaskID
@@ -1184,10 +1201,7 @@ func applyRunEvent(state RunTransitionState, event contracts.RunEvent) RunTransi
 
 	case contracts.RunEventContextCompacted:
 		withSequence.RunFeedsState = feedsWithRunPhase(feeds, taskID, RunPhaseRunning{Status: RunPhaseRunningStatusRunning})
-		text := "Context " + string(event.Trigger) + "-compacted at " + runsLocaleNumber(event.PreTokens) + " tokens."
-		if event.PostTokens != nil {
-			text = "Context " + string(event.Trigger) + "-compacted: " + runsLocaleNumber(event.PreTokens) + " → " + runsLocaleNumber(*event.PostTokens) + " tokens."
-		}
+		text := compactedText(event, runsIsTrue(record.Idle))
 		return transitionUpdateThread(withSequence, taskID, func(thread *domain.Thread) *domain.Thread {
 			next := *domain.WithMemoryUnheard(thread)
 			next.Messages = domain.AppendMessages(thread.Messages, []*domain.ConversationMessage{domain.CreateConversationMessage(domain.ConversationMessageKindSystem, text, nil, nil, nil, nil, nil)})

@@ -435,6 +435,19 @@ function serviceEvents(state, r, effects) {
   return options;
 }
 
+// What only the Go app has, which the TypeScript app never writes: idle compaction's setting, its
+// session record, its timer, and any patch to them.
+const GO_ONLY_KEYS = new Set(["idleCompaction", "idleCompactions"]);
+function withoutGoOnly(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item?.type !== "schedule-idle-compaction" && !(Array.isArray(item?.path) && item.path.some((key) => GO_ONLY_KEYS.has(key))))
+      .map(withoutGoOnly);
+  }
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !GO_ONLY_KEYS.has(key)).map(([key, item]) => [key, withoutGoOnly(item)]));
+}
+
 // Strict JSON equality up to key order; JSON already drops undefined.
 function diff(a, b, at = "$", out = []) {
   if (out.length > (global.CAP ?? 40)) return out;
@@ -683,10 +696,10 @@ async function runSeed(seed) {
     const asked = { now, input };
     trail.push(asked);
     const [left, right] = await Promise.all([ts.ask(asked), rs.ask(asked)]);
-    return [JSON.parse(left), JSON.parse(right)];
+    return [JSON.parse(left), withoutGoOnly(JSON.parse(right))];
   };
   const resetLeft = JSON.parse(await ts.ask({ reset: true }));
-  const resetRight = JSON.parse(await rs.ask({ reset: true }));
+  const resetRight = withoutGoOnly(JSON.parse(await rs.ask({ reset: true })));
   let problems = diff(resetLeft.state, resetRight.state, "$state");
   if (problems.length) { report(seed, 0, { reset: true }, problems, trail); ts.close(); rs.close(); return false; }
   let state = resetLeft.state;
@@ -720,7 +733,7 @@ async function runSeed(seed) {
       const thread = (left.state.threads ?? []).find((item) => item.id === taskId);
       const asked = { views: { at: now, taskId, before: r.int((thread?.messages?.length ?? 0) + 2), reference: r.pick([taskId, "fix", "Codex", "#2", "t-", "zzz", ""]) } };
       trail.push(asked);
-      const [tv, gv] = (await Promise.all([ts.ask(asked), rs.ask(asked)])).map((line) => JSON.parse(line));
+      const [tv, gv] = (await Promise.all([ts.ask(asked), rs.ask(asked)])).map((line, index) => index ? withoutGoOnly(JSON.parse(line)) : JSON.parse(line));
       if (tv.views?.patches && gv.views?.patches) {
         // A key TS holds as undefined patches as `{ path }`, which sets it to undefined, and its removal
         // removes a key JSON never showed. Go has no such key: it removes one that was there and says

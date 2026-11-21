@@ -33,6 +33,7 @@ func LoadViewPreferences(storage application.KeyValueStorage, viewportWidth *flo
 		ChromeBrowser:    or(stored.ChromeBrowser, false),
 		ComputerUse:      or(stored.ComputerUse, true),
 		MemoryProtection: new(or(stored.MemoryProtection, true)),
+		IdleCompaction:   new(or(stored.IdleCompaction, true)),
 		BrowserTools:     or(stored.BrowserTools, true),
 		Notifications:    or(stored.Notifications, true),
 		SidebarOpen:      or(stored.SidebarOpen, viewportWidth == nil || *viewportWidth >= 900),

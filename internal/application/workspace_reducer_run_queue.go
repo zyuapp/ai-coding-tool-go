@@ -340,6 +340,7 @@ func BeginRun(state *WorkspaceState, taskID string, runID string, provenance Run
 		Origin:         ActiveRunRunningOrigin(provenance.Origin),
 		Quiet:          provenance.Quiet,
 		Operation:      (*ActiveRunRunningOperation)(provenance.Operation),
+		Idle:           provenance.Idle,
 		UsersOwn:       provenance.UsersOwn,
 		Notified:       false,
 		Acknowledged:   false,

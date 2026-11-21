@@ -42,6 +42,8 @@ type ViewPreferences struct {
 	BrowserTools bool `json:"browserTools"`
 	// Whether excessive engine memory stops its owning thread. On when absent.
 	MemoryProtection *bool `json:"memoryProtection,omitzero"`
+	// Whether a large idle Claude thread is compacted before its prompt cache expires. On when absent.
+	IdleCompaction *bool `json:"idleCompaction,omitzero"`
 	// Whether a thread that needs the user reaches the desktop while the window is behind something else.
 	Notifications bool `json:"notifications"`
 	// Only the bindings that differ from the defaults; an action bound to nothing is stored as null.

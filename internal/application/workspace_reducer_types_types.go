@@ -26,6 +26,12 @@ type WorkspaceEventLimitsElapsed struct {
 	At   float64                      `json:"at"`
 }
 
+// An idle thread's prompt cache is about to expire, or an idle compaction has run too long.
+type WorkspaceEventIdleCompactionDue struct {
+	Type jsonx.Tag[lit.IdleCompactionDue] `json:"type"`
+	At   float64                          `json:"at"`
+}
+
 type WorkspaceEventViewClosed struct {
 	Type jsonx.Tag[lit.ViewClosed] `json:"type"`
 }
@@ -232,6 +238,14 @@ type WorkspaceEffectScheduleSnoozeExpiry struct {
 type WorkspaceEffectScheduleLimitReset struct {
 	Type jsonx.Tag[lit.ScheduleLimitReset] `json:"type"`
 	At   *float64                          `json:"at"`
+	// Keeps a view current after the input's own work. The input completes without waiting for it or
+	// taking on its result; the host still tracks it, and what it finds still lands through events.
+	FollowUp *bool `json:"followUp,omitzero"`
+}
+
+type WorkspaceEffectScheduleIdleCompaction struct {
+	Type jsonx.Tag[lit.ScheduleIdleCompaction] `json:"type"`
+	At   *float64                              `json:"at"`
 	// Keeps a view current after the input's own work. The input completes without waiting for it or
 	// taking on its result; the host still tracks it, and what it finds still lands through events.
 	FollowUp *bool `json:"followUp,omitzero"`
@@ -1116,6 +1130,7 @@ func (WorkspaceEffectRemoteSetEnabled) IsHostRemoteEffect()         {}
 func (WorkspaceEffectRemoteSetEnabled) IsWorkspaceEffect()          {}
 func (WorkspaceEffectResolveRunWorkspace) IsWorkspaceEffect()       {}
 func (WorkspaceEffectRevealWorktree) IsWorkspaceEffect()            {}
+func (WorkspaceEffectScheduleIdleCompaction) IsWorkspaceEffect()    {}
 func (WorkspaceEffectScheduleLimitReset) IsWorkspaceEffect()        {}
 func (WorkspaceEffectScheduleSnoozeExpiry) IsWorkspaceEffect()      {}
 func (WorkspaceEffectScheduleToastDismissal) IsWorkspaceEffect()    {}
@@ -1145,6 +1160,8 @@ func (WorkspaceEventCoordinationRemembered) IsWorkspaceEvent()      {}
 func (WorkspaceEventCoordinationRemembered) IsWorkspaceInput()      {}
 func (WorkspaceEventCoordinationReported) IsWorkspaceEvent()        {}
 func (WorkspaceEventCoordinationReported) IsWorkspaceInput()        {}
+func (WorkspaceEventIdleCompactionDue) IsWorkspaceEvent()           {}
+func (WorkspaceEventIdleCompactionDue) IsWorkspaceInput()           {}
 func (WorkspaceEventLimitsElapsed) IsWorkspaceEvent()               {}
 func (WorkspaceEventLimitsElapsed) IsWorkspaceInput()               {}
 func (WorkspaceEventPreferencesLoaded) IsWorkspaceEvent()           {}
@@ -1184,6 +1201,7 @@ func init() {
 	jsonx.RegisterUnion[WorkspaceEvent]("type", map[any]WorkspaceEvent{
 		"snoozes.elapsed":               WorkspaceEventSnoozesElapsed{},
 		"limits.elapsed":                WorkspaceEventLimitsElapsed{},
+		"idle-compaction.due":           WorkspaceEventIdleCompactionDue{},
 		"view.closed":                   WorkspaceEventViewClosed{},
 		"task.result-collected":         WorkspaceEventTaskResultCollected{},
 		"store.loaded":                  WorkspaceEventStoreLoaded{},
@@ -1292,6 +1310,7 @@ func init() {
 		"engine.reload-settings":      WorkspaceEffectEngineReloadSettings{},
 		"schedule-snooze-expiry":      WorkspaceEffectScheduleSnoozeExpiry{},
 		"schedule-limit-reset":        WorkspaceEffectScheduleLimitReset{},
+		"schedule-idle-compaction":    WorkspaceEffectScheduleIdleCompaction{},
 		"schedule-toast-dismissal":    WorkspaceEffectScheduleToastDismissal{},
 		"pick-project":                WorkspaceEffectPickProject{},
 		"add-project":                 WorkspaceEffectAddProject{},
@@ -1598,6 +1617,7 @@ func init() {
 		"view.set-computer-use":           contracts.ViewCommandViewSetComputerUse{},
 		"view.set-browser-tools":          contracts.ViewCommandViewSetBrowserTools{},
 		"view.set-memory-protection":      contracts.ViewCommandViewSetMemoryProtection{},
+		"view.set-idle-compaction":        contracts.ViewCommandViewSetIdleCompaction{},
 		"view.set-notifications":          contracts.ViewCommandViewSetNotifications{},
 		"view.inspect-subagent":           contracts.ViewCommandViewInspectSubagent{},
 		"view.set-settings-open":          contracts.ViewCommandViewSetSettingsOpen{},
@@ -1637,6 +1657,7 @@ func init() {
 		"view.jump-close":                 contracts.ViewCommandViewJumpClose{},
 		"snoozes.elapsed":                 WorkspaceEventSnoozesElapsed{},
 		"limits.elapsed":                  WorkspaceEventLimitsElapsed{},
+		"idle-compaction.due":             WorkspaceEventIdleCompactionDue{},
 		"view.closed":                     WorkspaceEventViewClosed{},
 		"task.result-collected":           WorkspaceEventTaskResultCollected{},
 		"store.loaded":                    WorkspaceEventStoreLoaded{},

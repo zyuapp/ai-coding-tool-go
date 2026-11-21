@@ -1103,6 +1103,11 @@ type Idle struct{}
 
 func (Idle) JSONLiteral() string { return "\"idle\"" }
 
+// IdleCompactionDue is "idle-compaction.due".
+type IdleCompactionDue struct{}
+
+func (IdleCompactionDue) JSONLiteral() string { return "\"idle-compaction.due\"" }
+
 // Image is "image".
 type Image struct{}
 
@@ -1797,6 +1802,11 @@ func (RunUnresolved) JSONLiteral() string { return "\"run.unresolved\"" }
 type Save struct{}
 
 func (Save) JSONLiteral() string { return "\"save\"" }
+
+// ScheduleIdleCompaction is "schedule-idle-compaction".
+type ScheduleIdleCompaction struct{}
+
+func (ScheduleIdleCompaction) JSONLiteral() string { return "\"schedule-idle-compaction\"" }
 
 // ScheduleLimitReset is "schedule-limit-reset".
 type ScheduleLimitReset struct{}
@@ -2722,6 +2732,11 @@ func (ViewSetDockOpen) JSONLiteral() string { return "\"view.set-dock-open\"" }
 type ViewSetFocused struct{}
 
 func (ViewSetFocused) JSONLiteral() string { return "\"view.set-focused\"" }
+
+// ViewSetIdleCompaction is "view.set-idle-compaction".
+type ViewSetIdleCompaction struct{}
+
+func (ViewSetIdleCompaction) JSONLiteral() string { return "\"view.set-idle-compaction\"" }
 
 // ViewSetMemoryProtection is "view.set-memory-protection".
 type ViewSetMemoryProtection struct{}

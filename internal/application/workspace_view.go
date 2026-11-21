@@ -375,6 +375,7 @@ func deriveOwnView(state *WorkspaceState, window WorktreeMenuState, collectionsO
 	view.ChromeBrowser = state.ChromeBrowser
 	view.ComputerUse = state.ComputerUse
 	view.MemoryProtection = state.MemoryProtection
+	view.IdleCompaction = state.IdleCompaction
 	view.BrowserTools = state.BrowserTools
 	view.Notifications = state.Notifications
 	view.FavoriteModels = state.FavoriteModels

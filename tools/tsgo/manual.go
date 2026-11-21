@@ -10,6 +10,7 @@ var manualDecls = map[string]string{
 	"host/host-module.ts#HostModule":             "effect handlers keyed by effect type (host_module_manual.go)",
 	"host/effect-host.ts#EffectHandler":          "generic over the effect type; one func over WorkspaceEffect (host_module_manual.go)",
 	"host/effect-host.ts#EffectHandlers":         "generic mapped type; a map keyed by effect type (host_module_manual.go)",
+	"host/effect-host.ts#EffectHost":             "adds the Go app's own idle-compaction timer (effect_host_manual.go)",
 }
 
 // Hand-written declarations that are nil-able (slices, maps, interfaces), so optional fields

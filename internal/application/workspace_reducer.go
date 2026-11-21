@@ -58,7 +58,7 @@ func reduceInput(state *WorkspaceState, input WorkspaceInput) WorkspaceTransitio
 		carried = []WorkspaceEffect{forwardEffect(computer)}
 	}
 	left := leavingComputer(state, input)
-	applied := ReconcileSimulators(left, ReconcileAppUpdate(left, ReconcileCoordination(left, ReconcileLimitPauses(left, ReconcileSnoozes(left, Apply(left, input), input), input), input)))
+	applied := ReconcileSimulators(left, ReconcileAppUpdate(left, ReconcileCoordination(left, ReconcileIdleCompaction(left, ReconcileLimitPauses(left, ReconcileSnoozes(left, Apply(left, input), input), input), input), input)))
 	effects := applied.Effects
 	if _, loaded := input.(WorkspaceEventPreferencesLoaded); loaded && applied.State.MemoryProtection != state.MemoryProtection {
 		effects = slices.Concat(effects, []WorkspaceEffect{WorkspaceEffectSendRunCommand{Command: contracts.RunCommandMemoryProtection{Enabled: applied.State.MemoryProtection}}})

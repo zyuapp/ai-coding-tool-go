@@ -25,37 +25,10 @@ func ReduceRunControl(state *WorkspaceState, input WorkspaceInput) Step {
 
 	case contracts.RunControlCommandRunCompact:
 		taskID := TargetID(state, input.TaskID)
-		var thread *domain.Thread
-		if taskID != nil {
-			thread = runThreadOf(state.Threads, *taskID)
-		}
-		if thread == nil || !CompactableSession(state, thread) || ThreadBusy(state, thread.ID) {
+		if taskID == nil {
 			return Step{}
 		}
-		if slices.Contains(state.CreatingWorktrees, thread.ID) {
-			return Step{Refusal: new(WorktreeCreatingError)}
-		}
-		if LeavingThreadIds(state).Has(thread.ID) {
-			return Step{Refusal: new(WorktreeReleasingError)}
-		}
-		project := ProjectFor(state, thread)
-		pending := &PendingRun{
-			ID:          NewID(),
-			RunID:       NewID(),
-			Origin:      PendingRunOriginComposer,
-			Operation:   PendingRunOperationCompact{},
-			TaskID:      new(thread.ID),
-			Text:        "",
-			Prompt:      "",
-			Attachments: []string{},
-		}
-		if project != nil {
-			pending.ProjectID = new(project.ID)
-		}
-		resolving := ResolveWorkspaceEffect(pending.ID, thread, project, WorktreeFor(state, thread), false, nil)
-		step := PendingStep(state, pending)
-		step.Effects = []WorkspaceEffect{resolving}
-		return step
+		return CompactionRequested(state, *taskID, false)
 
 	case contracts.RunControlCommandRunCancel:
 		taskID := TargetID(state, input.TaskID)
@@ -289,6 +262,49 @@ func modelGone(state *WorkspaceState, pending *PendingRun) *WorkspaceTransition 
 	return &refused
 }
 
+// CompactionRequested compacts a thread without adding a user message. idle is the app compacting a
+// thread nobody is using, which nothing is refused to.
+func CompactionRequested(state *WorkspaceState, taskID string, idle bool) Step {
+	thread := runThreadOf(state.Threads, taskID)
+	if thread == nil || !CompactableSession(state, thread) || ThreadBusy(state, thread.ID) {
+		return Step{}
+	}
+	if slices.Contains(state.CreatingWorktrees, thread.ID) {
+		if idle {
+			return Step{}
+		}
+		return Step{Refusal: new(WorktreeCreatingError)}
+	}
+	if LeavingThreadIds(state).Has(thread.ID) {
+		if idle {
+			return Step{}
+		}
+		return Step{Refusal: new(WorktreeReleasingError)}
+	}
+	project := ProjectFor(state, thread)
+	operation := PendingRunOperationCompact{}
+	if idle {
+		operation.Idle = new(true)
+	}
+	pending := &PendingRun{
+		ID:          NewID(),
+		RunID:       NewID(),
+		Origin:      PendingRunOriginComposer,
+		Operation:   operation,
+		TaskID:      new(thread.ID),
+		Text:        "",
+		Prompt:      "",
+		Attachments: []string{},
+	}
+	if project != nil {
+		pending.ProjectID = new(project.ID)
+	}
+	resolving := ResolveWorkspaceEffect(pending.ID, thread, project, WorktreeFor(state, thread), false, nil)
+	step := PendingStep(state, pending)
+	step.Effects = []WorkspaceEffect{resolving}
+	return step
+}
+
 func startCompaction(state *WorkspaceState, pending *PendingRun, workspace domain.WorkspaceRecord) WorkspaceTransition {
 	var thread *domain.Thread
 	if pending.TaskID != nil {
@@ -301,6 +317,9 @@ func startCompaction(state *WorkspaceState, pending *PendingRun, workspace domai
 	command.Operation = contracts.RunOperationCompact{PreTokens: thread.ContextUsage.Tokens}
 	provenance := ThreadRunStateAttendedRun
 	provenance.Operation = new(RunProvenanceOperationCompact)
+	if operation, ok := pending.Operation.(PendingRunOperationCompact); ok && runsIsTrue(operation.Idle) {
+		provenance.Idle = new(true)
+	}
 	return Settled(BeginRun(state, thread.ID, pending.RunID, provenance, nil, ""), []WorkspaceEffect{WorkspaceEffectStartRun{Command: command}}, nil)
 }
 

@@ -42,6 +42,7 @@ func EmptyWorkspaceState(storageError *string) *WorkspaceState {
 		InitialComputerUseState(),
 		InitialAutomationsState(),
 		InitialRunsState(),
+		InitialIdleCompactionState(),
 		InitialSideChatsState(),
 		InitialRemoteState(),
 		InitialAppUpdatesState(),

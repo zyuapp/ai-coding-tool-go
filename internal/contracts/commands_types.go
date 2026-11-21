@@ -237,6 +237,7 @@ func init() {
 		"view.set-computer-use":           ViewCommandViewSetComputerUse{},
 		"view.set-browser-tools":          ViewCommandViewSetBrowserTools{},
 		"view.set-memory-protection":      ViewCommandViewSetMemoryProtection{},
+		"view.set-idle-compaction":        ViewCommandViewSetIdleCompaction{},
 		"view.set-notifications":          ViewCommandViewSetNotifications{},
 		"view.inspect-subagent":           ViewCommandViewInspectSubagent{},
 		"view.set-settings-open":          ViewCommandViewSetSettingsOpen{},

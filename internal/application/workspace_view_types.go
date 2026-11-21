@@ -158,6 +158,7 @@ type OwnWorkspaceView struct {
 	ChromeBrowser              bool                                         `json:"chromeBrowser"`
 	ComputerUse                bool                                         `json:"computerUse"`
 	MemoryProtection           bool                                         `json:"memoryProtection"`
+	IdleCompaction             bool                                         `json:"idleCompaction"`
 	BrowserTools               bool                                         `json:"browserTools"`
 	Notifications              bool                                         `json:"notifications"`
 	FavoriteModels             []*domain.EngineModel                        `json:"favoriteModels"`

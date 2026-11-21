@@ -38,6 +38,9 @@ type declared struct {
 	Leaves bool     `json:"leaves"`
 }
 
+// Commands only the Go app declares, which the TypeScript app has no counterpart of.
+var goOnlyCommands = map[string]bool{"view.set-idle-compaction": true}
+
 func main() {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 1<<20), 1<<28)
@@ -119,6 +122,7 @@ func compareDefinitions(ts []declared, report func(string, ...any)) {
 			report("declaration %s: not an app command type in Go", definition.Type)
 		}
 	}
+	order = slices.DeleteFunc(slices.Clone(order), func(typ string) bool { return goOnlyCommands[typ] })
 	for _, typ := range order {
 		if !slices.Contains(tsOrder, typ) {
 			report("declaration %s: only in Go", typ)

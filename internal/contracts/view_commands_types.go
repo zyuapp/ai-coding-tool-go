@@ -233,6 +233,11 @@ type ViewCommandViewSetMemoryProtection struct {
 	Enabled bool                                   `json:"enabled"`
 }
 
+type ViewCommandViewSetIdleCompaction struct {
+	Type    jsonx.Tag[lit.ViewSetIdleCompaction] `json:"type"`
+	Enabled bool                                 `json:"enabled"`
+}
+
 type ViewCommandViewSetNotifications struct {
 	Type    jsonx.Tag[lit.ViewSetNotifications] `json:"type"`
 	Enabled bool                                `json:"enabled"`
@@ -658,6 +663,10 @@ func (ViewCommandViewSetFocused) IsAppCommand()                      {}
 func (ViewCommandViewSetFocused) IsViewCommand()                     {}
 func (ViewCommandViewSetFocused) IsWorkspaceInput()                  {}
 func (ViewCommandViewSetFocused) IsWorkspaceViewInput()              {}
+func (ViewCommandViewSetIdleCompaction) IsAppCommand()               {}
+func (ViewCommandViewSetIdleCompaction) IsViewCommand()              {}
+func (ViewCommandViewSetIdleCompaction) IsWorkspaceInput()           {}
+func (ViewCommandViewSetIdleCompaction) IsWorkspaceViewInput()       {}
 func (ViewCommandViewSetMemoryProtection) IsAppCommand()             {}
 func (ViewCommandViewSetMemoryProtection) IsViewCommand()            {}
 func (ViewCommandViewSetMemoryProtection) IsWorkspaceInput()         {}
@@ -791,6 +800,7 @@ func init() {
 		"view.set-computer-use":           ViewCommandViewSetComputerUse{},
 		"view.set-browser-tools":          ViewCommandViewSetBrowserTools{},
 		"view.set-memory-protection":      ViewCommandViewSetMemoryProtection{},
+		"view.set-idle-compaction":        ViewCommandViewSetIdleCompaction{},
 		"view.set-notifications":          ViewCommandViewSetNotifications{},
 		"view.inspect-subagent":           ViewCommandViewInspectSubagent{},
 		"view.set-settings-open":          ViewCommandViewSetSettingsOpen{},

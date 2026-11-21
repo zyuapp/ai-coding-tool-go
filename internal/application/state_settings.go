@@ -21,6 +21,7 @@ func InitialSettingsState() SettingsState {
 		ComputerUse:                true,
 		BrowserTools:               true,
 		MemoryProtection:           true,
+		IdleCompaction:             true,
 		Notifications:              true,
 		SettingsOpen:               false,
 		SettingsSection:            nil,

@@ -98,9 +98,9 @@ func TestForeignModelUsesDefaultContextWindow(t *testing.T) {
 
 func TestCapabilitiesAreCatalogueEntries(t *testing.T) {
 	every := `["confirm","plan","allow-edits","autonomous","bypass"]`
-	jsonEqual(t, CapabilitiesFor("codex"), `{"fastMode":true,"workflows":false,"subagents":true,"subagentMetadata":true,"review":true,"chromeBrowser":false,"policies":`+every+`,"unattendedPolicy":"autonomous"}`, "codex")
-	jsonEqual(t, CapabilitiesFor("claude"), `{"fastMode":false,"workflows":true,"subagents":true,"subagentMetadata":true,"review":false,"chromeBrowser":true,"policies":`+every+`,"unattendedPolicy":"autonomous"}`, "claude")
-	jsonEqual(t, CapabilitiesFor("opencode"), `{"fastMode":false,"workflows":false,"subagents":false,"subagentMetadata":false,"review":false,"chromeBrowser":false,"policies":["confirm","plan","allow-edits","bypass"],"unattendedPolicy":"bypass"}`, "opencode")
+	jsonEqual(t, CapabilitiesFor("codex"), `{"fastMode":true,"workflows":false,"subagents":true,"subagentMetadata":true,"review":true,"chromeBrowser":false,"policies":`+every+`,"unattendedPolicy":"autonomous","idleCompactionCacheMs":null}`, "codex")
+	jsonEqual(t, CapabilitiesFor("claude"), `{"fastMode":false,"workflows":true,"subagents":true,"subagentMetadata":true,"review":false,"chromeBrowser":true,"policies":`+every+`,"unattendedPolicy":"autonomous","idleCompactionCacheMs":3600000}`, "claude")
+	jsonEqual(t, CapabilitiesFor("opencode"), `{"fastMode":false,"workflows":false,"subagents":false,"subagentMetadata":false,"review":false,"chromeBrowser":false,"policies":["confirm","plan","allow-edits","bypass"],"unattendedPolicy":"bypass","idleCompactionCacheMs":null}`, "opencode")
 }
 
 func TestManualCompactionBelongsToTheModel(t *testing.T) {

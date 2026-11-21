@@ -56,6 +56,7 @@ var SettingsControls = []*SettingsControl{
 	{ID: SettingIDGeneralMemoryProtection, Section: SettingsSectionGeneral, Label: "Memory protection", Keywords: "memory leak ram process stop automatic"},
 	{ID: SettingIDGeneralNotifications, Section: SettingsSectionGeneral, Label: "Notifications", Keywords: "alert banner notify sound away desktop phone push"},
 	{ID: SettingIDGeneralChromeBrowser, Section: SettingsSectionGeneral, Label: "Claude in Chrome", Keywords: "extension browser chrome experimental"},
+	{ID: SettingIDGeneralIdleCompaction, Section: SettingsSectionGeneral, Label: "Compact idle threads", Keywords: "claude context cache summary idle compact tokens cost"},
 	{ID: SettingIDGeneralUpdates, Section: SettingsSectionGeneral, Label: "Updates", Keywords: "check version release upgrade"},
 	{ID: SettingIDGeneralLicenses, Section: SettingsSectionGeneral, Label: "Open source licenses", Keywords: "legal notices third party copyright"},
 	{ID: SettingIDUsagePlanLimits, Section: SettingsSectionUsage, Label: "Plan limits", Keywords: "quota tokens spend session weekly reset"},

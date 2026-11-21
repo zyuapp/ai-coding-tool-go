@@ -11,6 +11,7 @@ const (
 	SettingIDGeneralMemoryProtection    SettingID = "general.memory-protection"
 	SettingIDGeneralNotifications       SettingID = "general.notifications"
 	SettingIDGeneralChromeBrowser       SettingID = "general.chrome-browser"
+	SettingIDGeneralIdleCompaction      SettingID = "general.idle-compaction"
 	SettingIDGeneralUpdates             SettingID = "general.updates"
 	SettingIDGeneralLicenses            SettingID = "general.licenses"
 	SettingIDUsagePlanLimits            SettingID = "usage.plan-limits"

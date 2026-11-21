@@ -39,6 +39,7 @@ type StoredViewPreferences struct {
 	ComputerUse            *bool                       `json:"computerUse,omitzero"`
 	BrowserTools           *bool                       `json:"browserTools,omitzero"`
 	MemoryProtection       *bool                       `json:"memoryProtection,omitzero"`
+	IdleCompaction         *bool                       `json:"idleCompaction,omitzero"`
 	Notifications          *bool                       `json:"notifications,omitzero"`
 	Shortcuts              domain.ShortcutOverrides    `json:"shortcuts,omitzero"`
 	BrowserTabs            map[string][]string         `json:"browserTabs,omitzero"`
@@ -223,7 +224,7 @@ func ViewPreferences(state *WorkspaceState) contracts.ViewPreferences {
 			browserTabs[owner] = urls
 		}
 	}
-	memoryProtection := state.MemoryProtection
+	memoryProtection, idleCompaction := state.MemoryProtection, state.IdleCompaction
 	preferences := contracts.ViewPreferences{
 		Theme:            state.Theme,
 		ThemeMode:        state.ThemeMode,
@@ -237,6 +238,7 @@ func ViewPreferences(state *WorkspaceState) contracts.ViewPreferences {
 		ChromeBrowser:    state.ChromeBrowser,
 		ComputerUse:      state.ComputerUse,
 		MemoryProtection: &memoryProtection,
+		IdleCompaction:   &idleCompaction,
 		BrowserTools:     state.BrowserTools,
 		Notifications:    state.Notifications,
 		SidebarOpen:      state.SidebarOpen,
@@ -290,6 +292,7 @@ func ViewPreferenceState(next *WorkspaceState, preferences *contracts.ViewPrefer
 	next.ChromeBrowser = preferences.ChromeBrowser
 	next.ComputerUse = preferences.ComputerUse
 	next.MemoryProtection = preferences.MemoryProtection == nil || *preferences.MemoryProtection
+	next.IdleCompaction = preferences.IdleCompaction == nil || *preferences.IdleCompaction
 	next.BrowserTools = preferences.BrowserTools
 	next.Notifications = preferences.Notifications
 	next.SidebarOpen = preferences.SidebarOpen
@@ -393,6 +396,7 @@ func readStoredPreferences(storage KeyValueStorage) StoredViewPreferences {
 	stored.ChromeBrowser = flag("chromeBrowser")
 	stored.ComputerUse = flag("computerUse")
 	stored.MemoryProtection = flag("memoryProtection")
+	stored.IdleCompaction = flag("idleCompaction")
 	stored.BrowserTools = flag("browserTools")
 	stored.Notifications = flag("notifications")
 	stored.CaptureFocus = flag("captureFocus")

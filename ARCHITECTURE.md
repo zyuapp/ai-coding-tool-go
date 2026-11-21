@@ -6,7 +6,7 @@ Go + Wails v2 rewrite of [AI Coding Tool](https://github.com/zyuapp/ai-coding-to
 | path | ports | role |
 |---|---|---|
 | `main.go` | `src/main/main.ts`, `serve.ts` | entry: the Wails window, and the `serve` / `pair` subcommands |
-| `frontend/` | `src/renderer`, `index.html` | the React UI. `frontend/src/{application,contracts,domain}` are copies of the TypeScript layers the renderer imports for view projections and types |
+| `frontend/` | `src/renderer`, `index.html` | the React UI. `frontend/src/{application,contracts,domain}` are copies of the TypeScript layers the renderer imports for view projections and types, plus the declarations of this app's own features |
 | `frontend/src/renderer/bridge.ts` | `src/preload.ts` | builds `window.desktop` and `window.workspace` on the Wails runtime |
 | `internal/jsonx` | | JSON conventions below: unions, tags, tri-state fields, the shared options |
 | `internal/domain` | `src/domain` | types and pure functions |
@@ -63,12 +63,13 @@ Every type that crosses a boundary (window, store, phone, paired computer, MCP, 
 - Intersections and `extends` inline their parts (`json:",inline"` embedding) when their properties do not overlap, and are flattened otherwise. `Record<K, V>` and `Map<K, V>` are `map[K]V`; `Set<T>` is `jsonx.Set[T]` (an array in JSON).
 
 ## Types from TypeScript
-`go run ./tools/tsgo` reads `../ai-coding-tool/src/{domain,contracts,application,host}` with the TypeScript compiler (`tools/tsgo/extract.mjs`, on the `typescript` pinned in `tools/tsgo/package.json`, installed there on first run) and writes each file's exported types, and the local types they reach, to `internal/<layer>/<file>_types.go`, following the JSON rules above; `internal/jsonx/lit` holds the literals. Run it after pulling upstream changes; never edit `*_types.go` by hand. Exported constants and functions are hand-ported, except the constants of string-literal unions.
+`go run ./tools/tsgo` reads `frontend/src/{domain,contracts,application}` and `../ai-coding-tool/src/host` with the TypeScript compiler (`tools/tsgo/extract.mjs`, on the `typescript` pinned in `tools/tsgo/package.json`, installed there on first run) and writes each file's exported types, and the local types they reach, to `internal/<layer>/<file>_types.go`, following the JSON rules above; `internal/jsonx/lit` holds the literals. Run it after pulling upstream changes; never edit `*_types.go` by hand. Exported constants and functions are hand-ported, except the constants of string-literal unions.
 - Names: a declared type keeps its name (first letter upper); fields are PascalCase with Go initialisms (`taskId` → `TaskID`). An anonymous object or union is named for where it sits: parent + field (`RemoteStop.answer` → `RemoteStopAnswer`), parent + discriminator value for a union member (`WorkspaceEventSnoozesElapsed`), parent + method + param, or + `Result`, in functions. A union member written once and reached again (through `Extract`, or a nested union) is the same Go type.
 - Constructing a union member: `var e application.WorkspaceEvent = application.WorkspaceEventSnoozesElapsed{At: now}`. Switching: `switch e := e.(type) { case application.WorkspaceEventSnoozesElapsed: …; case contracts.ActionFailedEvent: … }`. A union's interface is its marker methods `Is<Union>()` (with the layer in the name where two layers share it).
 - Object types whose members are all functions are Go interfaces (ports). A function answering a `Promise<T>` takes a `context.Context` first and returns `(T, error)`; function-typed fields are `json:"-"`.
 - Generic declarations (`SliceTransition`, `Declarations`, …) are not generated; their instantiations are, structurally, where other types use them. Classes are hand-ported.
 - Types it cannot express are listed in `tools/tsgo/manual.go` and written by hand in `*_manual.go` beside the generated files.
+- Features only this app has (idle compaction) declare their types in the `frontend/src` copies, so a regenerate keeps them; syncing those copies from upstream keeps them too. The differential checks leave them out: `diff.cjs` strips their state and effects, `cmd/command-check` lists their commands.
 - `tools/tsgo/corpus/capture.cjs` records what the built TypeScript reducer takes and produces under random inputs into `internal/application/testdata/corpus.jsonl.gz`; `go test ./internal/application` requires every value to survive a decode into the generated types and an encode back.
 
 ## Concurrency and processes

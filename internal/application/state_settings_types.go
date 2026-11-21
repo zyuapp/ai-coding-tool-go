@@ -36,6 +36,8 @@ type SettingsState struct {
 	BrowserTools bool `json:"browserTools"`
 	// Whether excessive engine memory stops its owning thread.
 	MemoryProtection bool `json:"memoryProtection"`
+	// Whether a large idle thread is compacted before its prompt cache expires, on engines that bill reading it again.
+	IdleCompaction bool `json:"idleCompaction"`
 	// Whether a thread that needs the user is announced on the desktop. Off leaves it to the sidebar alone.
 	Notifications bool `json:"notifications"`
 	SettingsOpen  bool `json:"settingsOpen"`

@@ -135,7 +135,7 @@ var engines = map[AgentEngine]*engineRecord{
 		Label:         "Claude",
 		Models:        engineModels{List: claudeModels, Default: DefaultModel},
 		DefaultEffort: AgentEffortHigh,
-		Capabilities:  EngineCapabilities{FastMode: false, Workflows: true, Subagents: true, SubagentMetadata: true, Review: false, ChromeBrowser: true, Policies: ExecutionPolicies, UnattendedPolicy: ExecutionPolicyAutonomous},
+		Capabilities:  EngineCapabilities{FastMode: false, Workflows: true, Subagents: true, SubagentMetadata: true, Review: false, ChromeBrowser: true, Policies: ExecutionPolicies, UnattendedPolicy: ExecutionPolicyAutonomous, IdleCompactionCacheMs: new(60 * 60_000.0)},
 	},
 	AgentEngineCodex: {
 		Label:         "Codex",

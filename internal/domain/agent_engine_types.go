@@ -81,6 +81,9 @@ type EngineCapabilities struct {
 	Policies []ExecutionPolicy `json:"policies"`
 	// The mode a run nobody watches gets, such as a reviewer's, so it never waits on an approval.
 	UnattendedPolicy ExecutionPolicy `json:"unattendedPolicy"`
+	// How long the engine's prompt cache keeps an idle session, where reading the session again once it
+	// expires is billed in full. A large idle thread is compacted shortly before then. Null for none.
+	IdleCompactionCacheMs *float64 `json:"idleCompactionCacheMs"`
 }
 
 // Whether an engine can take a run right now, or what stands in the way. The app runs the engine

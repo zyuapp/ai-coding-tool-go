@@ -260,6 +260,7 @@ type Runtime struct {
 	drafts               *DraftPersistence
 	snoozeTimer          *SnoozeTimer
 	limitTimer           *SnoozeTimer
+	idleCompactionTimer  *SnoozeTimer
 	toastTimers          *ToastTimers
 	history              *RuntimeHistory
 	inputs               *RuntimeInputs
@@ -294,6 +295,7 @@ func CreateWorkspaceRuntime(host WorkspaceRuntimeHost) *Runtime {
 	r.drafts = CreateDraftPersistence(host.Storage, r.GetState, r.Dispatch)
 	r.snoozeTimer = CreateSnoozeTimer(func(at float64) { r.send(application.WorkspaceEventSnoozesElapsed{At: at}) })
 	r.limitTimer = CreateSnoozeTimer(func(at float64) { r.send(application.WorkspaceEventLimitsElapsed{At: at}) })
+	r.idleCompactionTimer = CreateSnoozeTimer(func(at float64) { r.send(application.WorkspaceEventIdleCompactionDue{At: at}) })
 	r.toastTimers = CreateToastTimers(func(id float64) { r.send(contracts.ViewCommandViewDismissToast{ID: id}) })
 	r.history = createRuntimeHistory(historyHost{
 		state:  r.GetState,
@@ -590,6 +592,7 @@ func (r *Runtime) runEffect(effect application.WorkspaceEffect, dispatch func(ct
 		EnvironmentRefreshes:   r.environmentRefreshes,
 		ScheduleSnoozeExpiry:   r.snoozeTimer.Schedule,
 		ScheduleLimitReset:     r.limitTimer.Schedule,
+		ScheduleIdleCompaction: r.idleCompactionTimer.Schedule,
 		ScheduleToastDismissal: r.toastTimers.Schedule,
 		Surface:                r.host.Surface,
 	})
@@ -817,6 +820,7 @@ func (r *Runtime) Dispose() {
 	r.drafts.Dispose()
 	r.snoozeTimer.Dispose()
 	r.limitTimer.Dispose()
+	r.idleCompactionTimer.Dispose()
 	r.toastTimers.Dispose()
 	r.mu.Lock()
 	r.started = nil

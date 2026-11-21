@@ -71,6 +71,8 @@ func init() {
 		claim(ProjectInputs, ReduceProjectCommands),
 		// The line itself moves in reconcileLimitPauses, which every input passes through.
 		claim([]string{"limits.elapsed"}, func(*WorkspaceState, WorkspaceInput) SliceTransition { return SliceTransition{} }),
+		// Compactions start in ReconcileIdleCompaction, which every input passes through.
+		claim([]string{"idle-compaction.due"}, func(*WorkspaceState, WorkspaceInput) SliceTransition { return SliceTransition{} }),
 		claim([]string{"limit.resume"}, func(state *WorkspaceState, input contracts.RunControlCommandLimitResume) SliceTransition {
 			return SliceTransition(Resumed(state, input.TaskID))
 		}),

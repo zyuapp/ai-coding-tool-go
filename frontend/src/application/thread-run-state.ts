@@ -112,6 +112,8 @@ export type RunProvenance = {
   quiet: boolean;
   /** A native thread operation that starts without adding a user message. */
   operation?: "compact" | "review";
+  /** Set on a compaction the app started because the thread sat idle. */
+  idle?: true;
   /**
    * Set on a turn the user's own message started, until a message from anyone else joins it. The
    * user is already there, so its coordinator hears it ended with its next wake rather than by one.

@@ -17,7 +17,7 @@ import (
 
 // testdata/corpus.jsonl.gz is what the TypeScript reducer took and produced under random inputs
 // (tools/tsgo/corpus/capture.cjs). Every value must survive a decode into the generated types and
-// an encode back, up to key order.
+// an encode back, up to key order, apart from the state this app keeps that the TypeScript app has none of.
 func TestGeneratedTypesRoundTripTypeScriptJSON(t *testing.T) {
 	path := os.Getenv("ACT_TYPES_CORPUS")
 	if path == "" {
@@ -47,7 +47,7 @@ func TestGeneratedTypesRoundTripTypeScriptJSON(t *testing.T) {
 		var problem error
 		switch entry.Of {
 		case "WorkspaceState":
-			problem = roundTrip[WorkspaceState](entry.Value)
+			problem = roundTrip[WorkspaceState](entry.Value, "idleCompaction", "idleCompactions")
 		case "WorkspaceInput":
 			problem = roundTrip[WorkspaceInput](entry.Value)
 		case "WorkspaceEffect":
@@ -78,7 +78,8 @@ func TestGeneratedTypesRoundTripTypeScriptJSON(t *testing.T) {
 	t.Logf("round-tripped %v; failed %v", counts, failures)
 }
 
-func roundTrip[T any](raw jsontext.Value) error {
+// roundTrip encodes raw back through T. goOnly names top-level fields the encoding may add.
+func roundTrip[T any](raw jsontext.Value, goOnly ...string) error {
 	var value T
 	if err := jsonx.Unmarshal(raw, &value); err != nil {
 		return fmt.Errorf("decode: %w", err)
@@ -93,6 +94,11 @@ func roundTrip[T any](raw jsontext.Value) error {
 	}
 	if err := json.Unmarshal(back, &got); err != nil {
 		return err
+	}
+	if fields, ok := got.(map[string]any); ok {
+		for _, field := range goOnly {
+			delete(fields, field)
+		}
 	}
 	if diffs := jsonDiff(want, got, "$", nil); len(diffs) > 0 {
 		return fmt.Errorf("%d differences, first: %v", len(diffs), diffs[:min(len(diffs), 3)])

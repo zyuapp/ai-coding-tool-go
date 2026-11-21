@@ -39,6 +39,10 @@ func readComputerUse(ctx context.Context, ask func(ctx context.Context) (*domain
 
 // SystemEffects tell the window itself, its schedules and its settings, none of which belongs to a thread.
 var SystemEffects = EffectHandlers{
+	"schedule-idle-compaction": handle(func(_ context.Context, effect application.WorkspaceEffectScheduleIdleCompaction, host EffectHost) error {
+		host.ScheduleIdleCompaction(effect.At)
+		return nil
+	}),
 	"schedule-limit-reset": handle(func(_ context.Context, effect application.WorkspaceEffectScheduleLimitReset, host EffectHost) error {
 		host.ScheduleLimitReset(effect.At)
 		return nil

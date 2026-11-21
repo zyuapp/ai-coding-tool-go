@@ -79,6 +79,7 @@ var ViewCommands = Declarations{
 	{Type: "view.set-computer-use", Fields: Shape{{"enabled", Boolean}}, At: CommandPlacementLocal},
 	{Type: "view.set-browser-tools", Fields: Shape{{"enabled", Boolean}}, At: CommandPlacementLocal},
 	{Type: "view.set-memory-protection", Fields: Shape{{"enabled", Boolean}}, At: CommandPlacementLocal},
+	{Type: "view.set-idle-compaction", Fields: Shape{{"enabled", Boolean}}, At: CommandPlacementLocal},
 	{Type: "view.set-notifications", Fields: Shape{{"enabled", Boolean}}, At: CommandPlacementLocal},
 	{Type: "view.inspect-subagent", Fields: Shape{{"taskId", OptionalText}, {"subagentId", Text}}, At: CommandPlacementThread},
 	{Type: "view.set-settings-open", Fields: Shape{{"open", Boolean}, {"section", Optional(declGuard(domain.IsSettingsSection))}, {"settingId", OptionalText}}, At: CommandPlacementLocal},

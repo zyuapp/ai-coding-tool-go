@@ -22,6 +22,7 @@ type PendingRunOperation interface {
 
 type PendingRunOperationCompact struct {
 	Type jsonx.Tag[lit.Compact] `json:"type"`
+	Idle *bool                  `json:"idle,omitzero"`
 }
 
 type PendingRunOperationResumeAfter string

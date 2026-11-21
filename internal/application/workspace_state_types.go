@@ -125,6 +125,8 @@ type WorkspaceState struct {
 	BrowserTools bool `json:"browserTools"`
 	// Whether excessive engine memory stops its owning thread.
 	MemoryProtection bool `json:"memoryProtection"`
+	// Whether a large idle thread is compacted before its prompt cache expires, on engines that bill reading it again.
+	IdleCompaction bool `json:"idleCompaction"`
 	// Whether a thread that needs the user is announced on the desktop. Off leaves it to the sidebar alone.
 	Notifications bool `json:"notifications"`
 	SettingsOpen  bool `json:"settingsOpen"`
@@ -215,9 +217,10 @@ type WorkspaceState struct {
 	QuietSessions     []*QuietSession             `json:"quietSessions"`
 	QueuedMessages    map[string][]*QueuedMessage `json:"queuedMessages"`
 	// Latest run per thread, so a reply from a superseded run can be dropped.
-	LastRunIDs       map[string]string `json:"lastRunIds"`
-	SideChats        []*SideChat       `json:"sideChats"`
-	SideChatSequence float64           `json:"sideChatSequence"`
+	LastRunIDs       map[string]string          `json:"lastRunIds"`
+	IdleCompactions  map[string]*IdleCompaction `json:"idleCompactions"`
+	SideChats        []*SideChat                `json:"sideChats"`
+	SideChatSequence float64                    `json:"sideChatSequence"`
 	// The bridge a phone reaches this Mac through, as the main process last reported it.
 	Remote domain.MobileServerState `json:"remote"`
 	// True while main is reading Tailscale, which the Phone page says out loud.
@@ -367,6 +370,8 @@ type SliceState struct {
 	BrowserTools *bool `json:"browserTools,omitzero"`
 	// Whether excessive engine memory stops its owning thread.
 	MemoryProtection *bool `json:"memoryProtection,omitzero"`
+	// Whether a large idle thread is compacted before its prompt cache expires, on engines that bill reading it again.
+	IdleCompaction *bool `json:"idleCompaction,omitzero"`
 	// Whether a thread that needs the user is announced on the desktop. Off leaves it to the sidebar alone.
 	Notifications *bool `json:"notifications,omitzero"`
 	SettingsOpen  *bool `json:"settingsOpen,omitzero"`
@@ -457,9 +462,10 @@ type SliceState struct {
 	QuietSessions     []*QuietSession             `json:"quietSessions,omitzero"`
 	QueuedMessages    map[string][]*QueuedMessage `json:"queuedMessages,omitzero"`
 	// Latest run per thread, so a reply from a superseded run can be dropped.
-	LastRunIDs       map[string]string `json:"lastRunIds,omitzero"`
-	SideChats        []*SideChat       `json:"sideChats,omitzero"`
-	SideChatSequence *float64          `json:"sideChatSequence,omitzero"`
+	LastRunIDs       map[string]string          `json:"lastRunIds,omitzero"`
+	IdleCompactions  map[string]*IdleCompaction `json:"idleCompactions,omitzero"`
+	SideChats        []*SideChat                `json:"sideChats,omitzero"`
+	SideChatSequence *float64                   `json:"sideChatSequence,omitzero"`
 	// The bridge a phone reaches this Mac through, as the main process last reported it.
 	Remote *domain.MobileServerState `json:"remote,omitzero"`
 	// True while main is reading Tailscale, which the Phone page says out loud.

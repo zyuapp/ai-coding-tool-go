@@ -13,7 +13,7 @@ var SettingsInputs = []string{
 	"view.set-reading-size", "view.set-terminal-size", "view.set-activity-project", "view.set-sidebar-open",
 	"view.focus-composer", "view.set-shortcut", "view.reset-shortcuts", "view.capture-shortcut", "shortcut.captured", "shortcut.unavailable",
 	"view.inspect-subagent", "subagent.activity.loaded", "view.set-capture-options", "view.set-chrome-browser", "view.set-computer-use",
-	"view.set-memory-protection", "view.set-browser-tools", "view.set-notifications", "view.set-session-panel-open", "view.set-settings-open", "view.set-usage-computer", "view.set-subagent-group",
+	"view.set-memory-protection", "view.set-idle-compaction", "view.set-browser-tools", "view.set-notifications", "view.set-session-panel-open", "view.set-settings-open", "view.set-usage-computer", "view.set-subagent-group",
 	"view.set-section-open",
 }
 
@@ -381,6 +381,10 @@ func ReduceSettings(state *WorkspaceState, input WorkspaceInput) SliceTransition
 			Persists: true,
 			Effects:  []WorkspaceEffect{WorkspaceEffectSendRunCommand{Command: contracts.RunCommandMemoryProtection{Enabled: enabled}}},
 		}
+
+	case contracts.ViewCommandViewSetIdleCompaction:
+		enabled := input.Enabled
+		return SliceTransition{Patch: func(next *WorkspaceState) { next.IdleCompaction = enabled }, Persists: true}
 
 	case contracts.ViewCommandViewSetChromeBrowser:
 		return setSwitch(state.ChromeBrowser, input.Enabled, func(next *WorkspaceState, enabled bool) { next.ChromeBrowser = enabled })

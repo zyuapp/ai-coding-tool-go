@@ -63,6 +63,8 @@ type ActiveRunRunning struct {
 	Quiet  bool                   `json:"quiet"`
 	// A native thread operation that starts without adding a user message.
 	Operation *ActiveRunRunningOperation `json:"operation,omitzero"`
+	// Set on a compaction the app started because the thread sat idle.
+	Idle *bool `json:"idle,omitzero"`
 	// Set on a turn the user's own message started, until a message from anyone else joins it. The
 	// user is already there, so its coordinator hears it ended with its next wake rather than by one.
 	UsersOwn  *bool                     `json:"usersOwn,omitzero"`
@@ -116,6 +118,8 @@ type ActiveRunRetrying struct {
 	Quiet  bool                    `json:"quiet"`
 	// A native thread operation that starts without adding a user message.
 	Operation *ActiveRunRetryingOperation `json:"operation,omitzero"`
+	// Set on a compaction the app started because the thread sat idle.
+	Idle *bool `json:"idle,omitzero"`
 	// Set on a turn the user's own message started, until a message from anyone else joins it. The
 	// user is already there, so its coordinator hears it ended with its next wake rather than by one.
 	UsersOwn  *bool                     `json:"usersOwn,omitzero"`
@@ -185,6 +189,8 @@ type RunProvenance struct {
 	Quiet  bool                `json:"quiet"`
 	// A native thread operation that starts without adding a user message.
 	Operation *RunProvenanceOperation `json:"operation,omitzero"`
+	// Set on a compaction the app started because the thread sat idle.
+	Idle *bool `json:"idle,omitzero"`
 	// Set on a turn the user's own message started, until a message from anyone else joins it. The
 	// user is already there, so its coordinator hears it ended with its next wake rather than by one.
 	UsersOwn *bool `json:"usersOwn,omitzero"`
