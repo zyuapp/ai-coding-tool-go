@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	releasesURL   = "https://github.com/zyuapp/ai-coding-tool/releases"
+	releasesURL   = "https://github.com/zyuapp/ai-coding-tool-go/releases"
 	checkInterval = time.Hour
 )
 
