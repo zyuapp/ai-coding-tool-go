@@ -12,7 +12,7 @@ import (
 )
 
 // SDKVersion is the Agent SDK whose wire behaviour this package reproduces.
-const SDKVersion = "0.3.329"
+const SDKVersion = "0.3.330"
 
 // SystemPromptKind says how a session's system prompt is set.
 type SystemPromptKind int
